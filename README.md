@@ -1,117 +1,120 @@
 # MORPH
 
-A small language model I'm building from scratch to chip away at one specific,
-annoying problem: the KV cache.
-
-If you've ever tried to run a transformer over a long context, you know the pain.
-The KV cache grows with every token, and pretty soon it — not the weights — is what's
-eating your VRAM. MORPH is a ~300M-parameter model designed so that most of its layers
-simply don't have a KV cache to grow, and the few that do keep it tiny. The goal is a
-model you can actually pretrain from scratch on a single free-tier GPU (Kaggle or Colab,
-16GB) without the memory falling over on long sequences.
-
-The name stands for **M**odular self-rem**ORPH**ing — because the second thing it does is
-reconfigure its own structure at inference to save compute. More on that below.
-
-## The idea
-
-There's no single trick here. There are four, each borrowed from work that already
-proved it out, stacked so they reinforce each other:
-
-1. **Most layers are Mamba2 (an SSM), not attention.** State-space layers carry a
-   fixed-size recurrent state instead of a cache that grows with the sequence. About
-   6 out of every 7 layers are SSM. They do the heavy lifting cheaply.
-
-2. **The few attention layers use MLA + CLA.** Where we *do* keep real attention — to
-   preserve the long-range recall that pure SSMs are weak at — we use Multi-head Latent
-   Attention, which compresses keys/values into a small latent vector, and Cross-Layer
-   Attention, which lets neighboring attention layers share that latent. So even the
-   caching layers barely cache anything.
-
-3. **Mixture-of-Depths lets tokens skip layers.** Easy tokens take a shortcut; hard ones
-   get the full stack. The model decides per token, at inference. That's the
-   "self-remodeling" part — it reshapes how much compute it spends on the fly.
-
-4. **It learns to model itself.** During training there's an auxiliary loss where the
-   network predicts its own hidden activations (from Premakumar et al. 2024). This sounds
-   odd, but the paper shows it pushes the network toward simpler, lower-rank internal
-   representations — and simpler internals are exactly what makes the low-rank KV
-   compression in step 2 work without hurting quality. It's the glue that holds the rest
-   together.
-
-There's also a Transformer²/SVF adapter planned (step 3 of the roadmap) that re-tunes the
-weights per task at inference, but that comes after the base model trains.
-
-## Does it actually shrink the cache?
-
-Here's the config-level number, comparing MORPH-300M against a same-depth vanilla
-multi-head-attention model:
+A ~300M LLM built from scratch to kill the **KV-cache tax** and **remodel itself** at
+inference. Trains on one 16GB GPU (Kaggle/Colab).
 
 ```
-per-token KV: MHA=86,016 B  ->  MORPH=640 B   (134x smaller)
-
-   context     MHA        MORPH     reduction
-     4,096   352 MB       2.6 MB      134x
-    16,384   1,409 MB    10.5 MB      134x
-    32,768   2,819 MB    21.0 MB      134x
+             KV cache @ 32k context
+   MHA  ████████████████████████████  2,819 MB
+ MORPH  ▏                                  21 MB   (134x smaller)
 ```
 
-At a 32k context the cache goes from ~2.8 GB to ~21 MB. That's the whole point.
+## The stack (28 layers)
 
-## What's actually here
+```
+  tokens
+    │
+    ▼
+ ┌──────────────────────────────────────────────┐
+ │  6×  Mamba2 SSM     ← constant state, NO cache │   ┐
+ │  1×  MLA attention  ← tiny latent cache        │   │ pattern
+ │      · · · repeated 4× · · ·                   │   │ "mmmmmma"
+ └──────────────────────────────────────────────┘   ┘  ×4 = 28
+    │                                             ↑
+    │                          self-modeling head─┘ (aux loss, training only)
+    ▼
+  RMSNorm → LM head
+```
 
-This is Stage 0 — the architecture and the training pipeline, fully wired and tested,
-but not yet trained to convergence. What works today:
+24 SSM layers carry the sequence cheaply; 4 attention layers keep long-range recall.
+Only the attention layers cache — and barely.
 
-- The full model (`morph/model/`) — config, the Mamba2 block (with a pure-PyTorch
-  fallback so it runs on a Mac/CPU when the CUDA kernels aren't available), MLA+CLA
-  attention, the self-modeling head, and scaffolds for Mixture-of-Depths and SVF.
-- A resumable, session-capped trainer (`morph/train/`). Kaggle and Colab kill your
-  session after a few hours, so the trainer checkpoints everything — model, optimizer,
-  LR schedule, and its place in the data stream — pushes it to the Hugging Face Hub, and
-  picks up exactly where it left off next session.
-- A streaming FineWeb-Edu data loader, plus a synthetic stream so the smoke tests run
-  anywhere.
-- The KV benchmark that produced the table above, and a perplexity eval.
-- Tests that pass on plain CPU, no GPU required.
+<details><summary><b>Why SSM-majority? (click)</b></summary>
 
-## Try it (CPU, no GPU)
+```
+ attention layer          SSM layer
+ ────────────────         ─────────────
+ cache grows per token    fixed-size state
+   t1 t2 t3 t4 ...           [====]  ← same size forever
+   ▓  ▓▓ ▓▓▓ ▓▓▓▓
+ O(n) memory              O(1) memory
+```
+SSMs never grow a cache — that's the whole memory win. But pure-SSM models forget
+long-range detail, so we keep a few real attention layers. ~6:1 is the Zamba2/Jamba ratio.
+</details>
+
+## Why the cache is 134x smaller
+
+```
+  MHA per token          MLA + CLA per token
+  ─────────────          ───────────────────
+  K:  ████████ (12h)     latent:  ██  (rank 128)
+  V:  ████████ (12h)     rope key: ▏  (32)
+  × 28 layers            × 2 shared groups (not 28!)
+  = 86,016 B             = 640 B
+```
+
+<details><summary><b>MLA + CLA, in ascii (click)</b></summary>
+
+```
+ MLA: don't cache big K/V — cache a small latent, rebuild on read
+   x ──▶ down-proj ──▶ [latent 128] ──▶ up-proj ──▶ K,V
+                          ▲ this is all that's cached
+
+ CLA: neighboring attention layers SHARE one latent
+   layer A ┐
+   layer B ┴─▶ [one shared latent]     4 attn layers → 2 caches
+```
+Latent compression (MLA) + cross-layer sharing (CLA) compound. Recall stays intact
+because full K/V are reconstructed for the math; only storage shrinks.
+</details>
+
+## The "self-remodel" part
+
+```
+ Mixture-of-Depths — each token picks its own compute
+   easy token  ──────────────skip──────────────▶   (cheap)
+   hard token  ──▶[ layer ]──▶[ layer ]──▶          (full)
+                     router decides, per token, at inference
+```
+
+<details><summary><b>Self-modeling: the model predicts itself (click)</b></summary>
+
+```
+   hidden state ──▶ aux head ──▶ guess its OWN future activations
+                                        │
+                          loss = LM + λ·(guess − actual)²
+```
+From Premakumar et al. 2024: forcing a network to predict its own internals makes those
+internals *simpler and lower-rank* — which is exactly what makes MLA's low-rank cache work
+without losing quality. It's the glue, not a gimmick.
+</details>
+
+Plus a Transformer²/SVF adapter (Stage 3) that re-tunes weights per task at inference.
+
+## Run it
 
 ```bash
-pip install torch numpy
-bash scripts/run_tests.sh
-PYTHONPATH=. python -m morph.train.pretrain --config configs/300m_hybrid.json \
-    --smoke --steps 20 --batch 2 --seq 128
-```
+# CPU smoke — no GPU needed
+pip install torch numpy && bash scripts/run_tests.sh
 
-## Train it for real (Kaggle / Colab)
-
-```bash
+# Real training on Kaggle/Colab (resumes across capped sessions via HF Hub)
 pip install -r requirements.txt mamba-ssm causal-conv1d
-export HF_TOKEN=...        # so checkpoints survive the session dying
-PYTHONPATH=. python -m morph.train.pretrain \
-  --config configs/300m_hybrid.json --hub_repo <you>/morph-300m \
-  --batch 8 --grad_accum 16 --seq 2048 --session_minutes 540
+export HF_TOKEN=...
+PYTHONPATH=. python -m morph.train.pretrain --config configs/300m_hybrid.json \
+  --hub_repo <you>/morph-300m --batch 8 --grad_accum 16 --seq 2048 --session_minutes 540
 ```
 
-Run it, let the session expire, run it again — it resumes from the Hub. The plan is
-~50–100B tokens, which is many sessions, so a valid checkpoint always exists along the way.
-There are ready-to-run notebooks in `notebooks/` for both platforms.
+Notebooks for both platforms in `notebooks/`.
 
-## Where it's going
+## Status
 
-- [x] **Stage 0** — architecture, tests, KV benchmark, resumable trainer
-- [ ] **Stage 1** — pretrain the hybrid backbone with self-modeling (~50–100B tokens)
-- [ ] **Stage 2** — turn on Mixture-of-Depths and anneal it in
-- [ ] **Stage 3** — add the Transformer²/SVF self-adaptation adapter
-- [ ] **Stage 4** — a light instruction-tuning pass so it's usable
-- [ ] **Stage 5** — publish the weights and a proper model card
+`[x]` Stage 0 arch + tests + KV bench + resumable trainer · `[ ]` Stage 1 pretrain (~50–100B tok)
+· `[ ]` Stage 2 MoD · `[ ]` Stage 3 SVF · `[ ]` Stage 4 SFT · `[ ]` Stage 5 publish
 
-## Credit where it's due
+<details><summary>Credits</summary>
 
-None of the individual pieces are mine — the contribution is the combination at this
-scale. The design leans on DeepSeek's MLA, Cross-Layer Attention (Brandon et al.), Mamba2,
-the Zamba2/Hymba hybrids, Mixture-of-Depths (Raposo et al.), Transformer²/SVF (Sakana),
-and the self-modeling work of Premakumar et al. See `MODEL_CARD.md` for the full list.
-
-MIT licensed. If you build on it, I'd love to hear about it.
+Combination is the contribution; the parts aren't mine: DeepSeek MLA · CLA (Brandon et al.)
+· Mamba2 · Zamba2/Hymba · Mixture-of-Depths (Raposo et al.) · Transformer²/SVF (Sakana) ·
+Self-Modeling (Premakumar et al.). Full list in `MODEL_CARD.md`. MIT licensed.
+</details>
