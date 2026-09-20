@@ -27,7 +27,8 @@ inference. Trains on one 16GB GPU (Kaggle/Colab).
 ```
 
 24 SSM layers carry the sequence cheaply; 4 attention layers keep long-range recall.
-Only the attention layers cache — and barely.
+Only the attention layers cache — and barely. **Full layer-by-layer diagram with tensor
+shapes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).**
 
 <details><summary><b>Why SSM-majority? (click)</b></summary>
 
