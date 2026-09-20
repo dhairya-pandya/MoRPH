@@ -1,0 +1,15 @@
+# Core (CPU dev works with just torch; GPU adds the fast kernels)
+torch>=2.4
+numpy
+
+# Data + tokenizer (Stage 1 real pretraining)
+datasets>=2.19
+transformers>=4.44
+huggingface_hub>=0.24
+
+# GPU-only fast kernels (install on Kaggle/Colab CUDA runtime; skipped on Mac/CPU)
+# mamba-ssm>=2.2.0
+# causal-conv1d>=1.4.0
+
+# Dev
+pytest
