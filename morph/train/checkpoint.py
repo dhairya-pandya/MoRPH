@@ -1,78 +1,121 @@
-"""Resumable checkpointing with optional off-box (Hugging Face Hub) storage.
+"""Resumable checkpoints: atomic local files, retention, HF Hub mirror, resume discovery.
 
-Kaggle/Colab local disk is ephemeral, so each save can be pushed to the HF Hub and
-the next session pulls the latest. A checkpoint bundles model + optimizer + LR
-scheduler + RNG + the data stream's consumed-document offset + step/token counters,
-so training resumes bit-for-bit-close across sessions.
+A checkpoint (`ckpt_<step>.pt`) bundles model, optimizers, grad scaler, step/tokens, RNG,
+both configs and the git SHA. Writes go to a temp file then `os.replace`, so a session
+killed mid-save never leaves a truncated "latest" file. Each save can be mirrored to a
+private HF model repo (`<hub_repo>/<run_name>/...`) in the background; the newest
+checkpoint across local dirs, extra resume dirs (e.g. Kaggle inputs) and the hub wins.
 """
 from __future__ import annotations
 
-import os
 import glob
+import os
+import re
+from typing import List, Optional, Tuple
+
 import torch
 
+CKPT_RE = re.compile(r"ckpt_(\d+)\.pt$")
 
-def save_checkpoint(path: str, *, model, optimizer, scheduler, step: int, tokens: int,
-                    docs_consumed: int, extra: dict | None = None):
+
+def ckpt_step(path: str) -> int:
+    m = CKPT_RE.search(os.path.basename(path))
+    return int(m.group(1)) if m else -1
+
+
+def ckpt_name(step: int) -> str:
+    return f"ckpt_{step:07d}.pt"
+
+
+def save_atomic(obj: dict, path: str):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    torch.save({
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict() if scheduler is not None else None,
-        "step": step,
-        "tokens": tokens,
-        "docs_consumed": docs_consumed,
-        "torch_rng": torch.get_rng_state(),
-        "extra": extra or {},
-    }, path)
+    tmp = path + ".tmp"
+    torch.save(obj, tmp)
+    os.replace(tmp, path)
 
 
-def load_checkpoint(path: str, *, model, optimizer=None, scheduler=None, map_location="cpu"):
-    ckpt = torch.load(path, map_location=map_location, weights_only=False)
-    model.load_state_dict(ckpt["model"])
-    if optimizer is not None and ckpt.get("optimizer") is not None:
-        optimizer.load_state_dict(ckpt["optimizer"])
-    if scheduler is not None and ckpt.get("scheduler") is not None:
-        scheduler.load_state_dict(ckpt["scheduler"])
-    if ckpt.get("torch_rng") is not None:
-        try:
-            torch.set_rng_state(ckpt["torch_rng"])
-        except Exception:
-            pass
-    return ckpt
+def list_local(dirs: List[str]) -> List[str]:
+    found = []
+    for d in dirs:
+        if d and os.path.isdir(d):
+            found += [p for p in glob.glob(os.path.join(d, "**", "ckpt_*.pt"), recursive=True)]
+    return sorted(found, key=ckpt_step)
 
 
-def latest_local(ckpt_dir: str) -> str | None:
-    files = glob.glob(os.path.join(ckpt_dir, "step_*.pt"))
-    if not files:
-        return None
-    return max(files, key=lambda p: int(p.split("step_")[-1].split(".")[0]))
+def prune_local(ckpt_dir: str, keep: int):
+    files = list_local([ckpt_dir])
+    for p in files[:-keep] if keep > 0 else []:
+        os.remove(p)
 
 
-def push_to_hub(local_path: str, repo_id: str, token: str | None = None):
-    """Upload a checkpoint file to a HF Hub model repo. No-op if hub unavailable."""
-    try:
+class Hub:
+    """Background mirror of a run folder to a private HF model repo. All failures are logged, never raised."""
+
+    def __init__(self, repo: str, run_name: str, keep: int = 2):
         from huggingface_hub import HfApi
-        api = HfApi(token=token or os.environ.get("HF_TOKEN"))
-        api.create_repo(repo_id, repo_type="model", exist_ok=True)
-        api.upload_file(path_or_fileobj=local_path,
-                        path_in_repo=os.path.basename(local_path),
-                        repo_id=repo_id, repo_type="model")
-        return True
-    except Exception as e:  # keep training alive even if upload fails
-        print(f"[checkpoint] hub push skipped: {e}")
-        return False
+        self.repo, self.prefix, self.keep = repo, run_name, keep
+        self.api = HfApi(token=os.environ.get("HF_TOKEN"))
+        self.pending = []
+        try:
+            self.api.create_repo(repo, repo_type="model", private=True, exist_ok=True)
+        except Exception as e:
+            print(f"[hub] create_repo failed: {e}", flush=True)
 
+    def upload(self, local: str, remote_name: Optional[str] = None):
+        remote = f"{self.prefix}/{remote_name or os.path.basename(local)}"
+        try:
+            self.pending.append(self.api.upload_file(path_or_fileobj=local, path_in_repo=remote,
+                                                     repo_id=self.repo, repo_type="model", run_as_future=True))
+        except Exception as e:
+            print(f"[hub] upload {remote} failed: {e}", flush=True)
 
-def pull_latest_from_hub(repo_id: str, ckpt_dir: str, token: str | None = None) -> str | None:
-    try:
-        from huggingface_hub import HfApi, hf_hub_download
-        api = HfApi(token=token or os.environ.get("HF_TOKEN"))
-        files = [f for f in api.list_repo_files(repo_id) if f.startswith("step_") and f.endswith(".pt")]
-        if not files:
+    def wait(self):
+        for f in self.pending:
+            try:
+                f.result()
+            except Exception as e:
+                print(f"[hub] upload failed: {e}", flush=True)
+        self.pending = []
+
+    def remote_ckpts(self) -> List[str]:
+        try:
+            files = self.api.list_repo_files(self.repo, repo_type="model")
+        except Exception as e:
+            print(f"[hub] list failed: {e}", flush=True)
+            return []
+        return sorted([f for f in files if f.startswith(self.prefix + "/") and CKPT_RE.search(f)], key=ckpt_step)
+
+    def prune(self, keep: Optional[int] = None):
+        """Wait for pending uploads, then delete all but the newest `keep` remote checkpoints."""
+        self.wait()
+        keep = self.keep if keep is None else keep
+        remote = self.remote_ckpts()
+        old = remote[:-keep] if keep > 0 else remote
+        for f in old:
+            try:
+                self.api.delete_file(f, repo_id=self.repo, repo_type="model")
+            except Exception as e:
+                print(f"[hub] delete {f} failed: {e}", flush=True)
+
+    def download(self, remote: str, local_dir: str) -> Optional[str]:
+        from huggingface_hub import hf_hub_download
+        try:
+            p = hf_hub_download(self.repo, remote, repo_type="model", local_dir=local_dir,
+                                token=os.environ.get("HF_TOKEN"))
+            return p
+        except Exception as e:
+            print(f"[hub] download {remote} failed: {e}", flush=True)
             return None
-        latest = max(files, key=lambda p: int(p.split("step_")[-1].split(".")[0]))
-        return hf_hub_download(repo_id, latest, local_dir=ckpt_dir, token=token)
-    except Exception as e:
-        print(f"[checkpoint] hub pull skipped: {e}")
-        return None
+
+
+def find_resume(ckpt_dir: str, extra_dirs: List[str], hub: Optional[Hub]) -> Optional[str]:
+    """Path of the newest checkpoint (downloading from the hub if that is newest)."""
+    local = list_local([ckpt_dir] + list(extra_dirs))
+    best_local: Tuple[int, Optional[str]] = (ckpt_step(local[-1]), local[-1]) if local else (-1, None)
+    if hub is not None:
+        remote = hub.remote_ckpts()
+        if remote and ckpt_step(remote[-1]) > best_local[0]:
+            got = hub.download(remote[-1], os.path.join(ckpt_dir, "_hub"))
+            if got:
+                return got
+    return best_local[1]

@@ -1,0 +1,23 @@
+{
+  "run_name": "main_s",
+  "out_dir": "runs",
+  "data_dir": "data/fineweb_edu_smollm2",
+  "seq_len": 2048,
+  "global_batch": 128,
+  "total_tokens": 5e9,
+  "optimizer": "muon",
+  "lr": 2e-3,
+  "warmup_steps": 500,
+  "decay_frac": 0.2,
+  "weight_decay": 0.1,
+  "grad_ckpt": true,
+  "log_every": 10,
+  "eval_every": 250,
+  "eval_tokens": 1000000,
+  "diag_tokens": 65536,
+  "ckpt_minutes": 45,
+  "milestone_tokens": 5e8,
+  "time_limit_hours": 11.5,
+  "hub_repo": "dhairyapandya/morph-runs",
+  "hub_keep": 2
+}

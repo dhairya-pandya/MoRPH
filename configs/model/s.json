@@ -1,0 +1,13 @@
+{
+  "vocab_size": 49152,
+  "d_model": 640,
+  "n_layers": 24,
+  "max_seq_len": 2048,
+  "attn_layers": [4, 9, 14, 19],
+  "cla_groups": [[4, 9], [14, 19]],
+  "n_heads": 10,
+  "head_dim": 64,
+  "kv_lora_rank": 128,
+  "mlp_hidden": 1728,
+  "self_model_lambda": 0.1
+}

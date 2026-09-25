@@ -103,7 +103,7 @@ pip install torch numpy && bash scripts/run_tests.sh
 pip install -r requirements.txt mamba-ssm causal-conv1d
 export HF_TOKEN=...
 PYTHONPATH=. python -m morph.train.pretrain --config configs/300m_hybrid.json \
-  --hub_repo <you>/morph-300m --batch 8 --grad_accum 16 --seq 2048 --session_minutes 540
+  --hub_repo dhairya-pandya/morph-300m --batch 8 --grad_accum 16 --seq 2048 --session_minutes 540
 ```
 
 Notebooks for both platforms in `notebooks/`.
