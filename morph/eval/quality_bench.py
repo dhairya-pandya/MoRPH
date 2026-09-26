@@ -1,66 +1,54 @@
-"""Quality eval: held-out perplexity + hooks for commonsense / long-context recall.
+"""Evaluate a checkpoint: validation perplexity + self-modeling diagnostics.
 
-Stage-1+ deliverable. Perplexity runs anywhere. Commonsense (HellaSwag/ARC/PIQA)
-and long-context needle (RULER) are wired to lm-eval-harness / a needle probe when
-available; otherwise they no-op with a message so the script stays runnable.
-
-Run: PYTHONPATH=. python -m morph.eval.quality_bench --ckpt checkpoints/step_X.pt \
-     --config configs/300m_hybrid.json
+    PYTHONPATH=. python -m morph.eval.quality_bench --ckpt runs/proxy_R1/checkpoints/ckpt_0003815.pt \
+        --data_dir data/fineweb_edu_smollm2 [--weights milestone.safetensors --config configs/model/s.json]
 """
 from __future__ import annotations
 
 import argparse
-import math
+import json
+
+import numpy as np
 import torch
 
+from morph.data.shards import ShardSet, val_batches
 from morph.model import MorphConfig, MorphForCausalLM
-from morph.train.checkpoint import load_checkpoint
-from morph.data.fineweb import PackedTextStream, SyntheticStream
+from morph.train.distributed import pick_precision
+from morph.train.pretrain import evaluate
 
 
-@torch.no_grad()
-def perplexity(model, stream, device, n_batches: int, batch: int):
-    model.eval()
-    tot_loss, tot = 0.0, 0
-    it = stream.batches(batch)
-    for _ in range(n_batches):
-        b = next(it).to(device)
-        ids, labels = b[:, :-1], b
-        out = model(ids, labels=labels[:, : ids.size(1)])
-        tot_loss += out["lm_loss"].item()
-        tot += 1
-    return math.exp(tot_loss / max(1, tot))
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="configs/300m_hybrid.json")
-    ap.add_argument("--ckpt", default=None)
-    ap.add_argument("--smoke", action="store_true")
-    ap.add_argument("--batch", type=int, default=4)
-    ap.add_argument("--n_batches", type=int, default=50)
-    ap.add_argument("--seq", type=int, default=512)
-    ap.add_argument("--tokenizer", default="meta-llama/Meta-Llama-3-8B")
-    args = ap.parse_args()
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    cfg = MorphConfig.from_json(args.config)
-    if args.smoke:
-        cfg.max_seq_len = args.seq
-    model = MorphForCausalLM(cfg).to(device)
+def load_model(args, device):
     if args.ckpt:
-        load_checkpoint(args.ckpt, model=model, map_location=device)
-
-    if args.smoke:
-        stream = SyntheticStream(cfg.vocab_size, args.seq)
+        ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        cfg = MorphConfig.from_dict(ck["model_config"])
+        model = MorphForCausalLM(cfg)
+        model.load_state_dict(ck["model"])
     else:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(args.tokenizer)
-        stream = PackedTextStream(tok, args.seq)
+        from safetensors.torch import load_file
+        cfg = MorphConfig.from_json(args.config)
+        model = MorphForCausalLM(cfg)
+        sd = {k: v.float() for k, v in load_file(args.weights).items()}
+        model.load_state_dict(sd, strict=not cfg.tie_embeddings)
+    return model.to(device)
 
-    ppl = perplexity(model, stream, device, args.n_batches, args.batch)
-    print(f"perplexity: {ppl:.2f}")
-    print("commonsense/long-context: install lm-eval-harness for HellaSwag/ARC/PIQA/RULER")
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--ckpt", default=None)
+    ap.add_argument("--weights", default=None)
+    ap.add_argument("--config", default=None)
+    ap.add_argument("--data_dir", required=True)
+    ap.add_argument("--seq_len", type=int, default=2048)
+    ap.add_argument("--eval_tokens", type=int, default=2_000_000)
+    ap.add_argument("--diag_tokens", type=int, default=65_536)
+    ap.add_argument("--batch", type=int, default=4)
+    args = ap.parse_args(argv)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = load_model(args, device)
+    ds = ShardSet(args.data_dir, "val", args.seq_len)
+    mbs = val_batches(ds, max(1, args.eval_tokens // args.seq_len), args.batch)
+    diag = torch.from_numpy(np.stack([ds.window(w)[:-1] for w in range(max(1, args.diag_tokens // args.seq_len))]))
+    print(json.dumps(evaluate(model, mbs, diag, device, pick_precision(device)), indent=2))
 
 
 if __name__ == "__main__":
