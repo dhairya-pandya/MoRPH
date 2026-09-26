@@ -44,7 +44,7 @@ class MorphConfig:
 
     # ---- objective ----
     z_loss: float = 1e-4
-    ce_chunk: int = 1024             # tokens per chunk in the chunked cross-entropy
+    ce_chunk: int = 2048             # tokens per chunk in the chunked cross-entropy
 
     # ---- self-modeling (Premakumar et al. 2024) ----
     self_model_enabled: bool = True

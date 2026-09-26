@@ -15,7 +15,7 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from .config import MorphConfig
-from .losses import chunked_cross_entropy
+from .losses import chunked_cross_entropy, fused_linear_cross_entropy
 from .mamba2_block import Mamba2Block
 from .mla_attention import MLAAttention
 from .mlp import SwiGLU
@@ -115,8 +115,12 @@ class MorphForCausalLM(nn.Module):
         if targets is None:
             out["logits"] = self.lm_head(hidden)
             return out
-        ce, zsq = chunked_cross_entropy(hidden, self.lm_head.weight, targets, self.cfg.ce_chunk)
-        loss = ce + self.cfg.z_loss * zsq
+        if torch.is_grad_enabled():
+            loss, ce, zsq = fused_linear_cross_entropy(hidden, self.lm_head.weight, targets,
+                                                       self.cfg.ce_chunk, self.cfg.z_loss)
+        else:
+            ce, zsq = chunked_cross_entropy(hidden, self.lm_head.weight, targets, self.cfg.ce_chunk)
+            loss = ce + self.cfg.z_loss * zsq
         out.update(ce=ce.detach(), z_loss=zsq.detach())
         if self.self_model is not None:
             if self.cfg.self_model_probe:   # measures self-modelability without shaping the backbone

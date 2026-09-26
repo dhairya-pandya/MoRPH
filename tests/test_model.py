@@ -170,3 +170,23 @@ def test_probe_mode_leaves_backbone_gradients_untouched():
         grads.append({n: p.grad for n, p in model.named_parameters() if not n.startswith("self_model")})
     for n in grads[1]:
         assert torch.allclose(grads[0][n], grads[1][n], atol=1e-6), n
+
+
+def test_fused_linear_ce_matches_reference():
+    from morph.model.losses import fused_linear_cross_entropy
+    torch.manual_seed(0)
+    h = torch.randn(3, 10, 16, requires_grad=True)
+    w = torch.randn(50, 16, requires_grad=True)
+    y = torch.randint(0, 50, (3, 10))
+    y[1, :4] = -100
+    z = 1e-2
+    loss, ce, zsq = fused_linear_cross_entropy(h, w, y, chunk=7, z_coef=z)
+    logits = h @ w.T
+    ref_ce = F.cross_entropy(logits.reshape(-1, 50), y.reshape(-1), ignore_index=-100)
+    lse = torch.logsumexp(logits, -1)[y != -100]
+    ref = ref_ce + z * (lse ** 2).mean()
+    assert torch.allclose(loss, ref, atol=1e-5) and torch.allclose(ce, ref_ce, atol=1e-5)
+    g1 = torch.autograd.grad(loss * 3.0, (h, w))
+    g2 = torch.autograd.grad(ref * 3.0, (h, w))
+    for a, b in zip(g1, g2):
+        assert torch.allclose(a, b, atol=1e-5), (a - b).abs().max()
