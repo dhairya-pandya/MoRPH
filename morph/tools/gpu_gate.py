@@ -68,7 +68,9 @@ def run_scenario(name, model_cfg, nproc, sets, out_dir, steps) -> dict:
     head = [ln for ln in r.stdout.splitlines() if ln.startswith("[pretrain]")]
     res["header"] = head[0] if head else ""
     if r.returncode != 0:
-        res["error"] = (r.stderr or r.stdout)[-1500:]
+        err = r.stderr or r.stdout
+        i = err.find("Error")
+        res["error"] = err[max(0, i - 2500): i + 500] if i >= 0 else err[-3000:]
         return res
     recs = [json.loads(ln) for ln in open(os.path.join(run_out, name, "metrics.jsonl")) if '"train"' in ln]
     last = recs[-1]

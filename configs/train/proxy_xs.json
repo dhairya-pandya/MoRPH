@@ -11,6 +11,7 @@
   "decay_frac": 0.2,
   "weight_decay": 0.1,
   "grad_ckpt": true,
+  "compile": true,
   "log_every": 10,
   "eval_every": 250,
   "eval_tokens": 1000000,

@@ -53,13 +53,15 @@ def autocast_ctx(device, amp_dtype):
     return torch.autocast(device.type, dtype=amp_dtype) if amp_dtype is not None else nullcontext()
 
 
-def probe_micro_batch(model, per_rank: int, tcfg, device, amp_dtype) -> int:
-    """Largest micro-batch dividing the per-rank batch whose fwd+bwd (+ optimizer state) fits in ~88% of memory."""
-    divisors = [c for c in (32, 16, 8, 4, 2, 1) if per_rank % c == 0]
+def probe_micro_batch(model, per_rank: int, tcfg, device, amp_dtype, world: int = 1) -> int:
+    """Largest micro-batch (<=16) dividing the per-rank batch whose fwd+bwd + optimizer state (+ DDP buckets) fits in 80% of memory."""
+    divisors = [c for c in (16, 8, 4, 2, 1) if per_rank % c == 0]
     if device.type != "cuda":
         return next(c for c in divisors if c <= 4)
     muon, rest = split_params(model)
     opt_bytes = 4 * sum(p.numel() for p in muon) + 8 * sum(p.numel() for p in rest)
+    if world > 1:
+        opt_bytes += 4 * sum(p.numel() for p in model.parameters())   # DDP gradient buckets
     total = torch.cuda.get_device_properties(device).total_memory
     vocab = model.cfg.vocab_size
     for c in divisors:
@@ -73,7 +75,7 @@ def probe_micro_batch(model, per_rank: int, tcfg, device, amp_dtype) -> int:
             peak = torch.cuda.max_memory_allocated(device)
             model.zero_grad(set_to_none=True)
             del out, x
-            if peak + opt_bytes < 0.88 * total:
+            if peak + opt_bytes < 0.80 * total:
                 return c
         except torch.OutOfMemoryError:
             model.zero_grad(set_to_none=True)
@@ -153,7 +155,7 @@ def main(argv=None):
     # ---- model / optimizers ----
     model = MorphForCausalLM(mcfg).to(device)
     model.set_grad_checkpointing(tcfg.grad_ckpt)
-    micro = tcfg.micro_batch or probe_micro_batch(model, per_rank, tcfg, device, amp_dtype)
+    micro = tcfg.micro_batch or probe_micro_batch(model, per_rank, tcfg, device, amp_dtype, info.world)
     if per_rank % micro:
         raise ValueError(f"per-rank batch {per_rank} not divisible by micro_batch {micro}")
     accum = per_rank // micro
