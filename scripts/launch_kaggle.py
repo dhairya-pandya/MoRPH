@@ -98,9 +98,9 @@ for name, p in procs:
     print("\n".join(open(f"{{W}}/logs/{{name}}.log").read().splitlines()[-40:]), flush=True)
 ''',
     "profile": r'''
-for extra in ["", "--mset ssm_chunk=128", "--mset ssm_chunk=32", "--mset self_model_enabled=false"]:
-    sh(f"cd {SRC} && python -m morph.tools.profile_step --config configs/model/xs.json --micro 8 {extra}")
-sh(f"cd {SRC} && python -m morph.tools.profile_step --config configs/model/s.json --micro 8")
+for extra in ["", "--mset ssm_chunk=128"]:
+    sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/xs.json --micro 8 {extra}")
+sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/s.json --micro 4")
 ''',
     "main": r'''
 DATA = data_dir()
