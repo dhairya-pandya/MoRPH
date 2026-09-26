@@ -9,5 +9,5 @@
   "head_dim": 64,
   "kv_lora_rank": 128,
   "mlp_hidden": 1728,
-  "self_model_lambda": 0.1
+  "self_model_lambda": 1.0
 }
