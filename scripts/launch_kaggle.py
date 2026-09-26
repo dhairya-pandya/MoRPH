@@ -97,6 +97,11 @@ for name, p in procs:
     print(f"=== {{name}} exit {{p.returncode}}", flush=True)
     print("\n".join(open(f"{{W}}/logs/{{name}}.log").read().splitlines()[-40:]), flush=True)
 ''',
+    "profile": r'''
+for extra in ["", "--mset ssm_chunk=128", "--mset ssm_chunk=32", "--mset self_model_enabled=false"]:
+    sh(f"cd {SRC} && python -m morph.tools.profile_step --config configs/model/xs.json --micro 8 {extra}")
+sh(f"cd {SRC} && python -m morph.tools.profile_step --config configs/model/s.json --micro 8")
+''',
     "main": r'''
 DATA = data_dir()
 sh(f"cd {{SRC}} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
@@ -139,7 +144,7 @@ def push(job: str, runs=()):
         "kernel_type": "script", "is_private": True, "enable_internet": True,
         "enable_gpu": job != "prep", "enable_tpu": False,
         "dataset_sources": [], "competition_sources": [], "model_sources": [],
-        "kernel_sources": [] if job in ("prep", "gate") else [f"{user}/{DATA_KERNEL}"],
+        "kernel_sources": [] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"],
     }
     if job != "prep":
         meta["machine_shape"] = "NvidiaTeslaT4"
@@ -156,7 +161,7 @@ def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("prep", "gate", "main"):
+    if cmd in ("prep", "gate", "main", "profile"):
         push(cmd)
     elif cmd == "proxy":
         if not rest or any(r not in PROXY_RUNS for r in rest) or len(rest) > 2:
