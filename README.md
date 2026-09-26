@@ -1,121 +1,87 @@
 # MORPH
 
-A ~300M LLM built from scratch to kill the **KV-cache tax** and **remodel itself** at
-inference. Trains on one 16GB GPU (Kaggle/Colab).
+A small LLM built from scratch to kill the **KV-cache tax**, trained with a **self-modeling**
+objective that pushes the model to make its own internals simple. Trains on free Kaggle
+T4×2 sessions (fp16) or any Ampere+ GPU (bf16), resuming across capped sessions.
 
 ```
-             KV cache @ 32k context
-   MHA  ████████████████████████████  2,819 MB
- MORPH  ▏                                  21 MB   (134x smaller)
+             inference memory @ 32k context (MORPH-S, 170M)
+   MHA  ████████████████████████████  2,013 MB
+ MORPH  ▍                                 24 MB   (86x; 512 B/token + 6.7 MB fixed SSM state)
 ```
 
-## The stack (28 layers)
+## The stack (MORPH-S: 24 layers, d=640)
 
 ```
   tokens
     │
     ▼
- ┌──────────────────────────────────────────────┐
- │  6×  Mamba2 SSM     ← constant state, NO cache │   ┐
- │  1×  MLA attention  ← tiny latent cache        │   │ pattern
- │      · · · repeated 4× · · ·                   │   │ "mmmmmma"
- └──────────────────────────────────────────────┘   ┘  ×4 = 28
-    │                                             ↑
-    │                          self-modeling head─┘ (aux loss, training only)
+  L0–3    Mamba2 SSM ×4          ← constant state, no cache
+  L4      MLA attention (NoPE)   ● produces latent A  ──┐ cached (128 values/token)
+  L5–8    Mamba2 SSM ×4                                 │
+  L9      MLA attention (NoPE)   ○ reuses latent A  ◀───┘
+  L10–13  Mamba2 SSM ×4
+  L14     MLA attention (NoPE)   ● produces latent B  ──┐ cached
+  L15–18  Mamba2 SSM ×4                                 │
+  L19     MLA attention (NoPE)   ○ reuses latent B  ◀───┘
+  L20–23  Mamba2 SSM ×4
+    │                     every layer = mixer + SwiGLU MLP (pre-norm residual)
     ▼
-  RMSNorm → LM head
+  RMSNorm ──▶ LM head
+          └──▶ self-model head: predicts the states entering L4/L9/L14/L19 (training only)
 ```
 
-24 SSM layers carry the sequence cheaply; 4 attention layers keep long-range recall.
-Only the attention layers cache — and barely. **Full layer-by-layer diagram with tensor
-shapes: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).**
+Design choices, each from published evidence:
+- **1 attention : 5 SSM, attention mid-stack, SSM at both ends** — hybrid ablations
+  (Meta, arXiv 2510.04800) find front-loaded attention hurts.
+- **NoPE MLA** — Mamba2 already supplies position; the latent is the only cached tensor
+  (Kimi Linear, arXiv 2510.26692).
+- **True cross-layer sharing** — the second attention layer of a pair reuses the first one's
+  latent with its own up-projection: 2 cache entries per token instead of 4.
+- **Mamba2 in plain PyTorch** (chunked SSD) with `mamba_ssm`-compatible parameters: no CUDA
+  build, runs on T4; fast kernels are optional.
 
-<details><summary><b>Why SSM-majority? (click)</b></summary>
+<details><summary><b>Self-modeling (Premakumar et al. 2024, arXiv 2407.10188)</b></summary>
 
 ```
- attention layer          SSM layer
- ────────────────         ─────────────
- cache grows per token    fixed-size state
-   t1 t2 t3 t4 ...           [====]  ← same size forever
-   ▓  ▓▓ ▓▓▓ ▓▓▓▓
- O(n) memory              O(1) memory
+  final hidden ──▶ linear "extra output units" ──▶ â  ≈  a = rmsnorm(state entering an attention layer)
+  loss = CE + z·lse² + λ · mean((â − a)²)        gradient flows into BOTH â and a
 ```
-SSMs never grow a cache — that's the whole memory win. But pure-SSM models forget
-long-range detail, so we keep a few real attention layers. ~6:1 is the Zamba2/Jamba ratio.
+The paper found that when a network must predict its own activations it becomes simpler
+(lower RLCT, narrower weights) — "learning to self-model is learning to make oneself
+modelable". MORPH aims that pressure at the states that get compressed into the cached
+latent. Targets are RMS-normalized so the model can't cheat by just shrinking activations.
+The proxy ablation tests it: λ ∈ {0, 0.1, 1.0}, a detached-target control, and a half-size
+latent (does self-modeling protect a smaller cache?).
 </details>
-
-## Why the cache is 134x smaller
-
-```
-  MHA per token          MLA + CLA per token
-  ─────────────          ───────────────────
-  K:  ████████ (12h)     latent:  ██  (rank 128)
-  V:  ████████ (12h)     rope key: ▏  (32)
-  × 28 layers            × 2 shared groups (not 28!)
-  = 86,016 B             = 640 B
-```
-
-<details><summary><b>MLA + CLA, in ascii (click)</b></summary>
-
-```
- MLA: don't cache big K/V — cache a small latent, rebuild on read
-   x ──▶ down-proj ──▶ [latent 128] ──▶ up-proj ──▶ K,V
-                          ▲ this is all that's cached
-
- CLA: neighboring attention layers SHARE one latent
-   layer A ┐
-   layer B ┴─▶ [one shared latent]     4 attn layers → 2 caches
-```
-Latent compression (MLA) + cross-layer sharing (CLA) compound. Recall stays intact
-because full K/V are reconstructed for the math; only storage shrinks.
-</details>
-
-## The "self-remodel" part
-
-```
- Mixture-of-Depths — each token picks its own compute
-   easy token  ──────────────skip──────────────▶   (cheap)
-   hard token  ──▶[ layer ]──▶[ layer ]──▶          (full)
-                     router decides, per token, at inference
-```
-
-<details><summary><b>Self-modeling: the model predicts itself (click)</b></summary>
-
-```
-   hidden state ──▶ aux head ──▶ guess its OWN future activations
-                                        │
-                          loss = LM + λ·(guess − actual)²
-```
-From Premakumar et al. 2024: forcing a network to predict its own internals makes those
-internals *simpler and lower-rank* — which is exactly what makes MLA's low-rank cache work
-without losing quality. It's the glue, not a gimmick.
-</details>
-
-Plus a Transformer²/SVF adapter (Stage 3) that re-tunes weights per task at inference.
 
 ## Run it
 
 ```bash
-# CPU smoke — no GPU needed
-pip install torch numpy && bash scripts/run_tests.sh
+# CPU gate (20 tests: SSD parity, causality, CLA, self-model grads, exact resume, DDP)
+bash scripts/run_tests.sh
 
-# Real training on Kaggle/Colab (resumes across capped sessions via HF Hub)
-pip install -r requirements.txt mamba-ssm causal-conv1d
-export HF_TOKEN=...
-PYTHONPATH=. python -m morph.train.pretrain --config configs/300m_hybrid.json \
-  --hub_repo dhairya-pandya/morph-300m --batch 8 --grad_accum 16 --seq 2048 --session_minutes 540
+# data: FineWeb-Edu -> uint16 shards, SmolLM2 tokenizer (CPU, ~5.2B tokens)
+PYTHONPATH=. python -m morph.data.prepare --out data/fineweb_edu_smollm2
+
+# train (1 GPU, or torchrun --nproc_per_node=2); resumes automatically
+PYTHONPATH=. python -m morph.train.pretrain --model_config configs/model/s.json \
+  --train_config configs/train/main_s.json --set data_dir=data/fineweb_edu_smollm2
 ```
 
-Notebooks for both platforms in `notebooks/`.
+On Kaggle, `scripts/launch_kaggle.py` pushes private kernels via the Kaggle CLI:
+`prep` (CPU), `gate` (throughput check), `proxy R0 R1` (two ablation runs, one per T4),
+`main` (a 12 h session of the main run). Checkpoints mirror to a private HF repo when a
+Kaggle secret `HF_TOKEN` is attached.
 
 ## Status
 
-`[x]` Stage 0 arch + tests + KV bench + resumable trainer · `[ ]` Stage 1 pretrain (~50–100B tok)
-· `[ ]` Stage 2 MoD · `[ ]` Stage 3 SVF · `[ ]` Stage 4 SFT · `[ ]` Stage 5 publish
+`[x]` v2 architecture + pipeline · `[~]` data prep + GPU gate (Kaggle) · `[ ]` proxy ablation
+(R0–R5) · `[ ]` main run MORPH-S, 5B tokens · `[ ]` MoD · `[ ]` SVF · `[ ]` SFT · `[ ]` publish
 
 <details><summary>Credits</summary>
 
-Combination is the contribution; the parts aren't mine: DeepSeek MLA · CLA (Brandon et al.)
-· Mamba2 · Zamba2/Hymba · Mixture-of-Depths (Raposo et al.) · Transformer²/SVF (Sakana) ·
-Self-Modeling (Premakumar et al.). Full list in `MODEL_CARD.md`. MIT licensed.
+Mamba2 / SSD (Dao & Gu) · DeepSeek MLA · CLA (Brandon et al.) · Kimi Linear · Muon /
+Moonlight · Mixture-of-Depths (Raposo et al.) · Transformer²/SVF (Sakana) · Self-Modeling
+(Premakumar et al.). MIT licensed.
 </details>
