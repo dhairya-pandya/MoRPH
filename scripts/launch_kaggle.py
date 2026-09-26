@@ -33,7 +33,7 @@ PROXY_RUNS = {
     "R2": ["self_model_lambda=1.0"],                                   # paper-faithful, strong
     "R3": ["self_model_lambda=1.0", "self_model_detach=true"],         # mechanism control
     "R4": ["self_model_probe=true", "kv_lora_rank=32"],                # half latent, baseline
-    "R5": ["self_model_lambda=0.1", "kv_lora_rank=32"],                # half latent + self-modeling
+    "R5": ["self_model_lambda=1.0", "kv_lora_rank=32"],                # half latent + self-modeling (lambda* from R1/R2)
 }
 
 HEADER = r'''
