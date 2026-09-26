@@ -8,7 +8,7 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py proxy R0 R1              # T4x2: two proxy runs, one per GPU
     python scripts/launch_kaggle.py main                     # T4x2: main run session (resumes from HF Hub)
     python scripts/launch_kaggle.py status <job>             # kernel status
-    python scripts/launch_kaggle.py fetch <job> [dir]        # download output + log
+    python scripts/launch_kaggle.py fetch <job> [dir] [regex|all]  # logs/metrics (all = + checkpoints)
 
 Kernel slugs: morph-<job>[-<runs>]. HF Hub checkpoints need a Kaggle secret HF_TOKEN attached
 to the kernel (one-time, in the Kaggle editor); without it runs keep checkpoints in the output.
@@ -172,7 +172,9 @@ def main(argv):
     elif cmd == "fetch":
         out = rest[1] if len(rest) > 1 else os.path.join(ROOT, "kaggle_out", rest[0])
         os.makedirs(out, exist_ok=True)
-        subprocess.run([KAGGLE, "kernels", "output", f"{username()}/{rest[0]}", "-p", out])
+        pattern = rest[2] if len(rest) > 2 else r".*\.(json|jsonl|log|txt)$"   # "all" = include checkpoints
+        cmd = [KAGGLE, "kernels", "output", f"{username()}/{rest[0]}", "-p", out]
+        subprocess.run(cmd if pattern == "all" else cmd + ["--file-pattern", pattern])
     else:
         raise SystemExit(__doc__)
 
