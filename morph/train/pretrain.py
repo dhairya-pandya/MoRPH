@@ -195,6 +195,12 @@ def main(argv=None):
         del ck
 
     metrics_path = os.path.join(run_dir, "metrics.jsonl")
+    if info.is_main and step > 0 and not os.path.exists(metrics_path) and path:
+        # resumed from another session's output (e.g. Kaggle input): carry its metrics forward
+        prev = os.path.join(os.path.dirname(os.path.dirname(path)), "metrics.jsonl")
+        if os.path.exists(prev):
+            import shutil
+            shutil.copy(prev, metrics_path)
     if info.is_main and hub is not None and not os.path.exists(metrics_path) and step > 0:
         got = hub.download(f"{tcfg.run_name}/metrics.jsonl", tcfg.out_dir)
         if got and os.path.abspath(got) != os.path.abspath(metrics_path):

@@ -106,7 +106,7 @@ sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/s
 DATA = data_dir()
 sh(f"cd {{SRC}} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
    f"--train_config configs/train/main_s.json --set data_dir={{DATA}} --set out_dir={{W}}/runs "
-   f"--set time_limit_hours=11.6 --set reserve_minutes=15")
+   f"--set time_limit_hours=11.6 --set reserve_minutes=15 --set 'resume_dirs=[\"/kaggle/input\"]'")
 ''',
 }
 
@@ -124,6 +124,11 @@ def username() -> str:
         return json.load(f)["username"]
 
 
+def kernel_exists(user: str, s: str) -> bool:
+    r = subprocess.run([KAGGLE, "kernels", "status", f"{user}/{s}"], capture_output=True, text=True)
+    return r.returncode == 0 and "status" in r.stdout
+
+
 def slug(job: str, runs=()) -> str:
     return DATA_KERNEL if job == "prep" else "morph-" + "-".join([job] + [r.lower() for r in runs])
 
@@ -139,12 +144,14 @@ def push(job: str, runs=()):
         body += JOBS["main"].format()
     else:
         body += JOBS[job]
+    # main run: mount the previous session's output so it can resume without HF Hub
+    chain = [f"{user}/{s}"] if job == "main" and kernel_exists(user, s) else []
     meta = {
         "id": f"{user}/{s}", "title": s, "code_file": "job.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_internet": True,
         "enable_gpu": job != "prep", "enable_tpu": False,
         "dataset_sources": [], "competition_sources": [], "model_sources": [],
-        "kernel_sources": [] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"],
+        "kernel_sources": [] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"] + chain,
     }
     if job != "prep":
         meta["machine_shape"] = "NvidiaTeslaT4"

@@ -1,5 +1,6 @@
 """Trainer gate: WSD, Muon, param coverage, exact resume, DDP (gloo) equivalence."""
 import glob
+import json
 import os
 import subprocess
 import sys
@@ -81,3 +82,15 @@ def test_ddp_two_processes_matches_single_process():
         ca, cb = _final(a), _final(b)
         for k in ca["model"]:
             assert torch.allclose(ca["model"][k], cb["model"][k], atol=2e-4, rtol=1e-3), k
+
+
+def test_resume_from_previous_session_output_dir():
+    """Kaggle chaining: a fresh out_dir resumes from a checkpoint found under resume_dirs, metrics carried over."""
+    with tempfile.TemporaryDirectory() as prev, tempfile.TemporaryDirectory() as new:
+        pretrain_main(_args(prev, "--set", "max_steps=3"))
+        pretrain_main(_args(new, "--set", "max_steps=3", "--set", f'resume_dirs=["{prev}"]'))
+        ck = _final(new)
+        assert ck["step"] == 6
+        lines = open(os.path.join(new, "proxy_xs", "metrics.jsonl")).read().splitlines()
+        steps = [json.loads(l)["step"] for l in lines if '"train"' in l]
+        assert steps[0] == 1 and steps[-1] == 6
