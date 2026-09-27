@@ -19,7 +19,7 @@ from .losses import chunked_cross_entropy, fused_linear_cross_entropy
 from .mamba2_block import Mamba2Block
 from .mla_attention import MLAAttention
 from .mlp import SwiGLU
-from .mod_router import MoDWrapper
+from .mod_router import MoDRouter, route_causal, route_topk
 from .self_model_head import SelfModelHead
 
 
@@ -30,18 +30,27 @@ class MorphLayer(nn.Module):
         if self.is_attn:
             self.mixer = MLAAttention(cfg, is_producer=cfg.is_producer(idx))
         else:
-            mixer = Mamba2Block(cfg)
-            if cfg.mod_enabled and idx in cfg.mod_layers:
-                mixer = MoDWrapper(cfg, mixer)
-            self.mixer = mixer
+            self.mixer = Mamba2Block(cfg)
         self.mlp = SwiGLU(cfg)
+        self.router = MoDRouter(cfg.d_model) if (cfg.mod_enabled and idx in cfg.mod_layers) else None
 
-    def forward(self, x, latent=None):
+    def _inner(self, x):
+        return self.mlp(self.mixer(x))
+
+    def forward(self, x, latent=None, capacity: Optional[float] = None, mod_mode: str = "topk"):
+        """Returns (x, latent, mod_aux, executed_fraction)."""
+        zero = x.new_zeros((), dtype=torch.float32)
         if self.is_attn:
             x, latent = self.mixer(x, latent)
-        else:
-            x = self.mixer(x)
-        return self.mlp(x), latent
+            return self.mlp(x), latent, zero, 1.0
+        if self.router is None:
+            return self._inner(x), latent, zero, 1.0
+        logits = self.router.logits(x)
+        if mod_mode == "causal":
+            out, frac = route_causal(x, logits, self._inner)
+            return out, latent, zero, frac
+        out, aux, frac = route_topk(x, logits, capacity, self._inner)
+        return out, latent, aux, frac
 
 
 class MorphModel(nn.Module):
@@ -54,24 +63,31 @@ class MorphModel(nn.Module):
         self.group_of = cfg.group_of()
         self.grad_ckpt = False
 
-    def forward(self, input_ids, collect: Iterable[int] = ()):
-        """Returns (final normed hidden, {layer_idx: residual state entering that layer})."""
+    def forward(self, input_ids, collect: Iterable[int] = (), capacity: Optional[float] = None,
+                mod_mode: str = "topk"):
+        """Returns (final normed hidden, {layer_idx: residual state entering that layer}, mod stats)."""
         collect = set(collect)
+        capacity = self.cfg.mod_capacity if capacity is None else capacity
         x = self.embed(input_ids)
         latents: Dict[int, torch.Tensor] = {}
         collected: Dict[int, torch.Tensor] = {}
+        aux_terms, fracs = [], {}
         for i, layer in enumerate(self.layers):
             if i in collect:
                 collected[i] = x
             g = self.group_of.get(i)
             lat = latents.get(g) if g is not None else None
             if self.grad_ckpt and self.training and torch.is_grad_enabled():
-                x, lat = checkpoint(layer, x, lat, use_reentrant=False)
+                x, lat, aux, frac = checkpoint(layer, x, lat, capacity, mod_mode, use_reentrant=False)
             else:
-                x, lat = layer(x, lat)
+                x, lat, aux, frac = layer(x, lat, capacity, mod_mode)
             if g is not None and g not in latents:
                 latents[g] = lat
-        return self.norm_f(x), collected
+            if layer.router is not None:
+                aux_terms.append(aux)
+                fracs[i] = frac
+        stats = {"mod_aux": torch.stack(aux_terms).mean() if aux_terms else None, "mod_frac": fracs}
+        return self.norm_f(x), collected, stats
 
 
 class MorphForCausalLM(nn.Module):
@@ -90,7 +106,11 @@ class MorphForCausalLM(nn.Module):
         std = self.cfg.init_std
         out_std = std / math.sqrt(2 * self.cfg.n_layers)
         for m in self.modules():
-            if isinstance(m, nn.Linear):
+            if isinstance(m, nn.Linear) and getattr(m.weight, "zero_init", False):
+                nn.init.zeros_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.Linear):
                 s = out_std if getattr(m.weight, "residual_out", False) else std
                 nn.init.normal_(m.weight, mean=0.0, std=s)
                 if m.bias is not None:
@@ -107,11 +127,13 @@ class MorphForCausalLM(nn.Module):
     def set_grad_checkpointing(self, on: bool = True):
         self.model.grad_ckpt = on
 
-    def forward(self, input_ids, targets=None, sm_lambda: Optional[float] = None, collect: Iterable[int] = ()):
-        """targets: already shifted next tokens (same shape as input_ids), -100 = ignore."""
+    def forward(self, input_ids, targets=None, sm_lambda: Optional[float] = None, collect: Iterable[int] = (),
+                mod_capacity: Optional[float] = None, mod_mode: str = "topk"):
+        """targets: already shifted next tokens (same shape as input_ids), -100 = ignore.
+        mod_mode: "topk" (training/static shapes) or "causal" (per-token router threshold, generation-safe)."""
         want = set(collect) | (set(self.targets) if (targets is not None and self.self_model is not None) else set())
-        hidden, collected = self.model(input_ids, collect=want)
-        out = {"hidden": hidden, "collected": collected}
+        hidden, collected, mod = self.model(input_ids, collect=want, capacity=mod_capacity, mod_mode=mod_mode)
+        out = {"hidden": hidden, "collected": collected, "mod_frac": mod["mod_frac"]}
         if targets is None:
             out["logits"] = self.lm_head(hidden)
             return out
@@ -131,5 +153,8 @@ class MorphForCausalLM(nn.Module):
                 sm, per = self.self_model(hidden, [collected[t] for t in self.targets])
                 loss = loss + lam * sm      # computed even at lam = 0 so DDP sees every parameter used
             out.update(sm_loss=sm.detach(), sm_per_target=per)
+        if mod["mod_aux"] is not None:
+            loss = loss + self.cfg.mod_aux_weight * mod["mod_aux"]
+            out["mod_aux"] = mod["mod_aux"].detach()
         out["loss"] = loss
         return out

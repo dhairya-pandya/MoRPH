@@ -53,10 +53,11 @@ class MorphConfig:
     self_model_detach: bool = False  # paper: gradients flow into the targets
     self_model_probe: bool = False   # baseline readout: head trains on fully detached states, backbone unaffected
 
-    # ---- Mixture-of-Depths (Stage 2; SSM layers only) ----
+    # ---- Mixture-of-Depths (Stage 2; whole SSM layers: Mamba2 + MLP) ----
     mod_enabled: bool = False
-    mod_capacity: float = 0.5
+    mod_capacity: float = 0.5        # fraction of tokens routed through each MoD layer (training top-k)
     mod_layers: List[int] = field(default_factory=list)
+    mod_aux_weight: float = 0.01     # BCE teaching the router to predict top-k membership (causal inference)
 
     # ---- SVF (Stage 3) ----
     svf_enabled: bool = False

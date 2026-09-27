@@ -102,7 +102,7 @@ def test_self_model_gradient_reaches_targets_only_when_not_detached():
     for detach, expect in [(False, True), (True, False)]:
         cfg = tiny_cfg(self_model_detach=detach, self_model_targets=[2])
         model = MorphForCausalLM(cfg)
-        hidden, collected = model.model(ids, collect=[2])
+        hidden, collected, _ = model.model(ids, collect=[2])
         sm, _ = model.self_model(hidden.detach(), [collected[2]])   # isolate the target path
         sm.backward()
         g = model.model.layers[0].mlp.w_down.weight.grad

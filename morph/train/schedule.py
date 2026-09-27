@@ -26,3 +26,10 @@ def decay_start_step(total_steps: int, decay_frac: float) -> int:
 def sm_lambda(step: int, warmup: int, lam: float) -> float:
     """Self-modeling weight ramps 0 -> lam over the LR warmup."""
     return lam * min(1.0, (step + 1) / max(1, warmup))
+
+
+def mod_capacity(step: int, anneal_steps: int, start: float, end: float) -> float:
+    """MoD capacity: linear from `start` (1.0 = every token runs every layer) to `end` over anneal_steps."""
+    if anneal_steps <= 0:
+        return end
+    return start + (end - start) * min(1.0, step / anneal_steps)

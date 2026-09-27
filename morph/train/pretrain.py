@@ -34,7 +34,7 @@ from morph.train import distributed as D
 from morph.train.checkpoint import Hub, ckpt_name, find_resume, prune_local, save_atomic
 from morph.train.config import TrainConfig, apply_overrides
 from morph.train.optim import build_optimizers, set_lr, split_params
-from morph.train.schedule import decay_start_step, sm_lambda, wsd_lr
+from morph.train.schedule import decay_start_step, mod_capacity, sm_lambda, wsd_lr
 
 MAX_CONSECUTIVE_SKIPS = 20
 
@@ -83,6 +83,27 @@ def probe_micro_batch(model, per_rank: int, tcfg, device, amp_dtype, world: int 
     raise RuntimeError("even micro_batch=1 does not fit; lower seq_len or enable grad_ckpt")
 
 
+def load_init_weights(model, spec: str) -> None:
+    """Load weights for continued training (e.g. Stage-1 -> Stage-2 MoD). Only new MoD routers may be missing."""
+    path = spec
+    if spec.startswith("hf:"):
+        from huggingface_hub import hf_hub_download
+        repo, file = spec[3:].split(":", 1)
+        path = hf_hub_download(repo, file, repo_type="model", token=os.environ.get("HF_TOKEN"))
+    if path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        sd = {k: v.float() for k, v in load_file(path).items()}
+    else:
+        sd = torch.load(path, map_location="cpu", weights_only=False)["model"]
+    if model.cfg.tie_embeddings:
+        sd.setdefault("lm_head.weight", sd["model.embed.weight"])
+    missing, unexpected = model.load_state_dict(sd, strict=False)
+    bad = [k for k in missing if ".router." not in k]
+    if bad or unexpected:
+        raise ValueError(f"init_from {spec}: missing {bad[:5]} unexpected {list(unexpected)[:5]}")
+    print(f"[pretrain] initialized from {spec} (new params: {len(missing)})", flush=True)
+
+
 class MetricsLog:
     def __init__(self, path: str, enabled: bool, wandb_run=None):
         self.path, self.enabled, self.wandb = path, enabled, wandb_run
@@ -110,6 +131,17 @@ def evaluate(model, val_mbs, diag_ids, device, amp_dtype) -> dict:
         n += mb.size(0)
     res = {"val_ce": tot / max(1, n)}
     res["val_ppl"] = float(torch.tensor(res["val_ce"]).exp())
+    if model.cfg.mod_enabled:   # generation-safe routing: per-token router threshold, no top-k
+        tot, n, fr = 0.0, 0, []
+        for mb in val_mbs[: max(1, len(val_mbs) // 4)]:
+            mb = mb.to(device)
+            with autocast_ctx(device, amp_dtype):
+                out = model(mb[:, :-1], mb[:, 1:], mod_mode="causal")
+            tot += float(out["ce"]) * mb.size(0)
+            n += mb.size(0)
+            fr.append(sum(out["mod_frac"].values()) / len(out["mod_frac"]))
+        res["val_ce_causal"] = tot / max(1, n)
+        res["mod_exec_causal"] = sum(fr) / len(fr)
     res.update(state_diagnostics(model, diag_ids.to(device), amp_dtype))
     model.train(was)
     return res
@@ -194,6 +226,9 @@ def main(argv=None):
                 print("[pretrain] WARNING: budget changed after LR decay began; schedule will jump", flush=True)
         del ck
 
+    if not path and tcfg.init_from:
+        load_init_weights(model, tcfg.init_from)
+
     metrics_path = os.path.join(run_dir, "metrics.jsonl")
     if info.is_main and step > 0 and not os.path.exists(metrics_path) and path:
         # resumed from another session's output (e.g. Kaggle input): carry its metrics forward
@@ -249,7 +284,7 @@ def main(argv=None):
     t_log, tok_log = time.time(), tokens
     next_milestone = (int(tokens // tcfg.milestone_tokens) + 1) * tcfg.milestone_tokens if tcfg.milestone_tokens else None
     skips = 0
-    sums = torch.zeros(4, device=device)
+    sums = torch.zeros(5, device=device)
     gnorm = torch.tensor(0.0)
 
     def save(tag: str):
@@ -289,6 +324,7 @@ def main(argv=None):
         lr = wsd_lr(step, total_steps, tcfg.warmup_steps, tcfg.decay_frac, tcfg.lr, tcfg.min_lr_frac)
         set_lr(optimizers, lr)
         lam = sm_lambda(step, tcfg.warmup_steps, mcfg.self_model_lambda)
+        cap = mod_capacity(step, tcfg.mod_anneal_steps, tcfg.mod_capacity_start, mcfg.mod_capacity)
         mbs = micro_batches(train_ds, sampler, step, info.rank, info.world, micro)
         sums.zero_()
         for i, mb in enumerate(mbs):
@@ -296,11 +332,12 @@ def main(argv=None):
             sync = ddp.no_sync() if (info.enabled and i < len(mbs) - 1) else nullcontext()
             with sync:
                 with autocast_ctx(device, amp_dtype):
-                    out = ddp(mb[:, :-1], mb[:, 1:], sm_lambda=lam)
+                    out = ddp(mb[:, :-1], mb[:, 1:], sm_lambda=lam, mod_capacity=cap)
                 scaler.scale(out["loss"] / accum).backward()
             sums += torch.stack([out["loss"].detach().float(), out["ce"].float(),
                                  out.get("sm_loss", torch.zeros((), device=device)).float(),
-                                 out["z_loss"].float()]) / accum
+                                 out["z_loss"].float(),
+                                 out.get("mod_aux", torch.zeros((), device=device)).float()]) / accum
         for opt in optimizers:
             scaler.unscale_(opt)
         gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg.grad_clip)
@@ -326,7 +363,7 @@ def main(argv=None):
             tok_s = (tokens - tok_log) / max(1e-9, now - t_log)
             t_log, tok_log = now, tokens
             rec = {"type": "train", "step": step, "tokens": tokens, "loss": vals[0], "ce": vals[1],
-                   "sm": vals[2], "z": vals[3], "lr": lr, "lam": lam, "gnorm": float(gnorm),
+                   "sm": vals[2], "z": vals[3], "mod_aux": vals[4], "mod_cap": cap, "lr": lr, "lam": lam, "gnorm": float(gnorm),
                    "scale": float(scaler.get_scale()) if scaler.is_enabled() else 1.0,
                    "tok_s": tok_s, "elapsed_h": (now - t_start) / 3600}
             if peak:
@@ -344,7 +381,8 @@ def main(argv=None):
                 res = evaluate(model, val_mbs, diag_ids, device, amp_dtype)
                 log.write({"type": "eval", "step": step, "tokens": tokens, **res})
                 print(f"[eval] step {step} val_ce {res['val_ce']:.4f} ppl {res['val_ppl']:.2f} " +
-                      " ".join(f"{k} {v:.3f}" for k, v in res.items() if k.startswith(("erank", "sm_r2"))), flush=True)
+                      " ".join(f"{k} {v:.3f}" for k, v in res.items()
+                               if k.startswith(("erank", "sm_r2", "val_ce_causal", "mod_exec"))), flush=True)
             D.barrier(info)
 
         if next_milestone is not None and tokens >= next_milestone:

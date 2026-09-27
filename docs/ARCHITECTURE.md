@@ -68,3 +68,19 @@ inference `W_up` can be absorbed into the query and only `c` is stored.
 | MORPH-S | 512 B (2 latents × 128) | 6.74 MB SSM state + conv tail | 23.5 MB |
 
 `PYTHONPATH=. python -m morph.eval.kv_bench --config configs/model/s.json` reproduces the table.
+
+## Stage 2 — Mixture-of-Depths (`configs/model/s_mod.json`)
+
+```
+ MoD layers (S): 1, 3, 6, 8, 11, 13, 16, 18, 21   (every other SSM layer, never attention)
+ router r_t = w·x_t + b            (zero-init → scale 2σ(0) = 1: the Stage-1 model is unchanged at start)
+
+ training ("topk"):  top-k tokens per sequence (k = capacity·L), gathered IN ORDER
+      x_sel → Mamba2 + MLP → x_sel + 2σ(r)·(f(x_sel) − x_sel)  → scattered back; others skip
+      + 0.01 · BCE(r, top-k membership)      capacity anneals 1.0 → 0.5
+ generation ("causal"): token t runs the layer iff r_t > 0 — no future tokens needed;
+      a skipped token leaves the SSM state untouched, as in the gathered training sequence
+```
+Continue-training from a Stage-1 checkpoint with `--set init_from=<ckpt>` (only router
+weights may be missing). Eval logs `val_ce` (top-k), `val_ce_causal`, and `mod_exec_causal`
+(fraction of tokens that actually ran the routed layers).

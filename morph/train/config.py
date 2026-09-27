@@ -54,6 +54,12 @@ class TrainConfig:
     hub_keep: int = 2
     resume_dirs: List[str] = field(default_factory=list)
 
+    # stage-2+ continued training
+    init_from: str = ""                   # weights to start from when no resume checkpoint exists:
+                                          # local .pt/.safetensors, or "hf:<repo_id>:<path_in_repo>"
+    mod_capacity_start: float = 1.0       # MoD capacity anneals linearly start -> model mod_capacity
+    mod_anneal_steps: int = 0
+
     @property
     def tokens_per_step(self) -> int:
         return self.global_batch * self.seq_len

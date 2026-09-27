@@ -31,7 +31,7 @@ def _ce(model, mb, amp_dtype):
 
 def _ce_grad(model, mb):
     from morph.model.losses import chunked_cross_entropy
-    hidden, _ = model.model(mb[:, :-1])
+    hidden, _, _ = model.model(mb[:, :-1])
     ce, _ = chunked_cross_entropy(hidden, model.lm_head.weight, mb[:, 1:], model.cfg.ce_chunk)
     return ce
 

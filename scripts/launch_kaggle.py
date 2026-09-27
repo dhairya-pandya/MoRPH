@@ -7,6 +7,7 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py gate                     # T4x2: backend parity + throughput
     python scripts/launch_kaggle.py proxy R0 R1              # T4x2: two proxy runs, one per GPU
     python scripts/launch_kaggle.py main                     # T4x2: main run session (resumes from HF Hub)
+    python scripts/launch_kaggle.py stage2_xs                # T4x2: MoD vs control, both from proxy R2
     python scripts/launch_kaggle.py status <job>             # kernel status
     python scripts/launch_kaggle.py fetch <job> [dir] [regex|all]  # logs/metrics (all = + checkpoints)
 
@@ -102,6 +103,30 @@ for extra in ["", "--mset ssm_chunk=128"]:
     sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/xs.json --micro 8 {extra}")
 sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/s.json --micro 4")
 ''',
+    "stage2_xs": r'''
+DATA = data_dir()
+init = sorted(glob.glob("/kaggle/input/**/proxy_R2/checkpoints/ckpt_*.pt", recursive=True))[-1]
+print("init_from", init, flush=True)
+RUNS = {
+    "mod_xs": ("configs/model/xs_mod.json", []),
+    "ctrl_xs": ("configs/model/xs.json", ["--mset", "self_model_lambda=1.0"]),
+}
+os.makedirs(f"{W}/logs", exist_ok=True)
+procs = []
+for gpu, (name, (mcfg, extra)) in enumerate(RUNS.items()):
+    cmd = [sys.executable, "-m", "morph.train.pretrain", "--model_config", f"{SRC}/{mcfg}",
+           "--train_config", f"{SRC}/configs/train/stage2_mod_xs.json", "--set", f"run_name={name}",
+           "--set", f"data_dir={DATA}", "--set", f"out_dir={W}/runs", "--set", f"init_from={init}",
+           "--set", "keep_ckpts=1"] + extra
+    log = open(f"{W}/logs/{name}.log", "w")
+    procs.append((name, subprocess.Popen(cmd, cwd=SRC, env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)),
+                                         stdout=log, stderr=subprocess.STDOUT)))
+while any(p.poll() is None for _, p in procs):
+    time.sleep(600)
+for name, p in procs:
+    print(f"=== {name} exit {p.returncode}", flush=True)
+    print("\n".join(open(f"{W}/logs/{name}.log").read().splitlines()[-40:]), flush=True)
+''',
     "main": r'''
 DATA = data_dir()
 sh(f"cd {{SRC}} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
@@ -142,6 +167,8 @@ def push(job: str, runs=()):
         body += JOBS["proxy"].format(runs={r: PROXY_RUNS[r] for r in runs})
     elif job == "main":
         body += JOBS["main"].format()
+    elif job == "stage2_xs":
+        body += JOBS["stage2_xs"]
     else:
         body += JOBS[job]
     # main run: mount the previous session's output so it can resume without HF Hub
@@ -151,7 +178,8 @@ def push(job: str, runs=()):
         "kernel_type": "script", "is_private": True, "enable_internet": True,
         "enable_gpu": job != "prep", "enable_tpu": False,
         "dataset_sources": [], "competition_sources": [], "model_sources": [],
-        "kernel_sources": [] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"] + chain,
+        "kernel_sources": ([] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"]) + chain
+                          + ([f"{user}/morph-proxy-r2-r3"] if job == "stage2_xs" else []),
     }
     if job != "prep":
         meta["machine_shape"] = "NvidiaTeslaT4"
@@ -168,7 +196,7 @@ def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("prep", "gate", "main", "profile"):
+    if cmd in ("prep", "gate", "main", "profile", "stage2_xs"):
         push(cmd)
     elif cmd == "proxy":
         if not rest or any(r not in PROXY_RUNS for r in rest) or len(rest) > 2:

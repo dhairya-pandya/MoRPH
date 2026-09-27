@@ -61,7 +61,7 @@ def split_params(model):
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if p.ndim == 2 and p is not embed:
+        if p.ndim == 2 and p is not embed and not getattr(p, "no_muon", False):
             muon.append(p)
         else:
             adamw.append(p)
