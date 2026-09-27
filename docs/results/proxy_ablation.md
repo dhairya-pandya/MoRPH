@@ -31,4 +31,18 @@ Findings:
 4. Single seed: the R0/R1 loss gap is noise; R2/R3 gaps and the rank/energy trends are larger
    and monotone in λ.
 
-Pending: R4/R5 (latent 32 with λ=0 vs λ*=1.0) — does self-modeling protect a halved cache?
+## Halved cache latent (R4/R5)
+
+| run | setting | val CE | Δ vs R0 | Δ vs same-rank baseline | erank L3 / L8 | energy32 L3 / L8 |
+|---|---|---|---|---|---|---|
+| R4 | latent 32, baseline (probe) | 3.3784 | +0.28% | — | 330.9 / 341.2 | 0.460 / 0.429 |
+| R5 | latent 32, λ=1.0 | 3.3959 | +0.80% | +0.52% | 304.6 / 323.7 | 0.526 / 0.478 |
+
+5. **Self-modeling did not protect a smaller cache.** Halving the latent costs +0.28% without
+   self-modeling; with λ=1.0 the self-modeling cost grows from +0.18% (latent 64) to +0.52%
+   (latent 32). The states become more concentrated (energy32 0.46 → 0.53) but that did not
+   buy back quality. The thesis "simpler internals let a smaller latent keep quality" is not
+   supported at 44M params / 0.5B tokens (single seed).
+6. Net: self-modeling reliably simplifies the cached-state inputs (lower effective rank, more
+   energy in few directions) at a small loss cost, but at this scale that simplification does
+   not translate into a better cache-size/quality trade-off.

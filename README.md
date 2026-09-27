@@ -76,7 +76,7 @@ Kaggle secret `HF_TOKEN` is attached.
 
 ## Status
 
-`[x]` v2 architecture + pipeline · `[x]` data (5.2B tokens) · `[~]` proxy ablation (R0–R3 done,
+`[x]` v2 architecture + pipeline · `[x]` data (5.2B tokens) · `[x]` proxy ablation (R0–R5,
 [results](docs/results/proxy_ablation.md)) · `[ ]` main run MORPH-S, 5B tokens · `[ ]` MoD · `[ ]` SVF · `[ ]` SFT · `[ ]` publish
 
 <details><summary>Credits</summary>
