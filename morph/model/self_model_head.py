@@ -1,37 +1,47 @@
-"""Self-modeling auxiliary head (Premakumar et al. 2024).
+"""Self-modeling auxiliary head (Premakumar et al. 2024, arXiv 2407.10188).
 
-An auxiliary task in which the network predicts a subset of its OWN hidden
-activations. Training on LM + lambda * self-prediction is reported to induce
-*emergent simplification*: the internal representation becomes simpler, lower
-effective rank, and more robust.
+Paper recipe: augment the OUTPUT layer with extra linear units that predict the activations
+of chosen internal layers; loss = task + (w_s / n) * ||a_hat - a||^2, with gradients flowing
+into BOTH the prediction and the target ("learning to self-model is learning to make oneself
+modelable"). The reported effect is self-regularization: lower RLCT, narrower weights.
 
-In MORPH this is load-bearing: simpler / lower-rank internals compress better,
-which is exactly what MLA's low-rank latent KV and the MoD router want. The head
-predicts the (detached) activation of a chosen layer from an *earlier* layer's
-state, so the network is pressured to make its own future state predictable.
+LM adaptation used here:
+- source: the final normalized hidden state (the LM head's input), as in the paper;
+- targets: residual states entering the attention layers — the states compressed into the
+  cached MLA latent;
+- targets are RMS-normalized (parameter-free). In a pre-norm residual net a global rescale
+  of the residual stream is functionally free, so a raw MSE could be lowered by shrinking
+  activations without simplifying anything; normalizing leaves only structure to predict;
+- `detach=True` is the ablation control that removes the "make oneself modelable" path.
 """
 from __future__ import annotations
 
+from typing import List, Tuple
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+
+def rms_normalize(t: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    t = t.float()
+    return t * torch.rsqrt(t.pow(2).mean(-1, keepdim=True) + eps)
 
 
 class SelfModelHead(nn.Module):
-    def __init__(self, cfg):
+    def __init__(self, cfg, n_targets: int):
         super().__init__()
-        self.enabled = cfg.self_model_enabled
-        self.target_units = min(cfg.self_model_dim, cfg.d_model)
-        # small MLP predictor: current state -> predicted target-layer state (subset of units)
-        hidden = max(self.target_units, cfg.d_model // 2)
-        self.net = nn.Sequential(
-            nn.Linear(cfg.d_model, hidden, bias=False),
-            nn.GELU(),
-            nn.Linear(hidden, self.target_units, bias=False),
-        )
+        self.n, self.d = n_targets, cfg.d_model
+        self.detach = cfg.self_model_detach
+        self.proj = nn.Linear(cfg.d_model, n_targets * cfg.d_model, bias=True)
+        self.proj.weight.muon_splits = [cfg.d_model] * n_targets
 
-    def forward(self, source_state: torch.Tensor, target_state: torch.Tensor) -> torch.Tensor:
-        """Return the self-modeling MSE loss (scalar). Target is detached."""
-        pred = self.net(source_state)                       # (B, L, target_units)
-        target = target_state[..., : self.target_units].detach()
-        return F.mse_loss(pred, target)
+    def forward(self, source: torch.Tensor, targets: List[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns (mean loss over targets, per-target losses detached)."""
+        B, L, _ = source.shape
+        pred = self.proj(source).float().view(B, L, self.n, self.d)
+        losses = []
+        for k, t in enumerate(targets):
+            a = rms_normalize(t.detach() if self.detach else t)
+            losses.append((pred[:, :, k] - a).pow(2).mean())
+        per = torch.stack(losses)
+        return per.mean(), per.detach()

@@ -1,20 +1,16 @@
-"""CLA grouping: assign attention layers to cross-layer KV-sharing groups.
+"""CLA accounting helpers: which attention layers cache a latent.
 
-Given the layer schedule, every `cla_group_size` consecutive *attention* layers share
-one `SharedLatentKV`. Returns, for each attention layer index, the id of the shared
-module it should use. The backbone builds one SharedLatentKV per distinct group id.
+Grouping itself lives in `MorphConfig.groups()`; only the producer (first layer) of each
+group computes and caches the latent.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import List
 
 
-def assign_cla_groups(block_types: List[str], group_size: int) -> Dict[int, int]:
-    """Map layer_index -> shared_group_id, for attention ('a') layers only."""
-    mapping: Dict[int, int] = {}
-    attn_count = 0
-    for i, t in enumerate(block_types):
-        if t == "a":
-            mapping[i] = attn_count // max(1, group_size)
-            attn_count += 1
-    return mapping
+def cached_layers(cfg) -> List[int]:
+    return [g[0] for g in cfg.groups()]
+
+
+def kv_bytes_per_token(cfg, dtype_bytes: int = 2) -> int:
+    return len(cfg.groups()) * cfg.kv_lora_rank * dtype_bytes
