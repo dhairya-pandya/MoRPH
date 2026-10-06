@@ -1,36 +1,33 @@
-# Model Card: MORPH-300M
+# Model Card: MORPH-S
 
-**Status:** in development (Stage 0 complete — architecture + pipeline; not yet trained to convergence).
+**Status:** in training (v2 pipeline complete; proxy ablation and main run on Kaggle).
 
 ## Summary
-MORPH-300M is a ~300M-parameter (299.6M non-embedding) decoder LM built to minimize
-the KV-cache/accuracy tradeoff while self-remodeling for efficiency. It targets
-from-scratch training on a single 16GB GPU (Kaggle/Colab).
+MORPH-S is a ~170M-parameter (138M non-embedding) decoder LM: a Mamba2-majority hybrid with
+four NoPE Multi-head Latent Attention layers sharing two cached latents, trained with a
+self-modeling auxiliary objective. It targets from-scratch training on free Kaggle T4×2.
 
 ## Architecture
-- 28 layers, d_model=768, 12 heads. Layer schedule `mmmmmma` tiled → 24 SSM + 4 attention.
-- **SSM layers:** Mamba2 (constant-size recurrent state, no KV cache).
-- **Attention layers:** Multi-head Latent Attention (MLA) — low-rank latent KV
-  (rank 128) + decoupled RoPE (32 dim).
-- **CLA:** the 4 attention layers share KV in groups of 2 → 2 latent-KV modules.
-- **Self-modeling head:** predicts a 256-unit subset of a mid-layer's hidden state
-  (λ=0.1) for emergent simplification.
-- **Mixture-of-Depths** (Stage 2) and **Transformer²/SVF** (Stage 3): off at init.
+- 24 layers, d_model 640; Mamba2 (20 layers, 20 heads × 64, d_state 128) + MLA at layers
+  4, 9, 14, 19 (10 heads × 64, latent 128, no positional encoding); SwiGLU MLP 1728.
+- Cross-layer latent sharing: (4 → 9), (14 → 19).
+- Self-modeling head predicts the RMS-normalized residual states entering the attention
+  layers from the final hidden state; gradients flow into the targets (Premakumar et al.).
 
-## Measured (config-level)
-- KV cache per token: **640 B** vs 86,016 B for equal-depth MHA → **134x** smaller.
-- At 32k ctx: **21 MB** vs 2,819 MB.
+## Inference memory (fp16)
+512 B/token of cache + 6.74 MB constant SSM state per sequence; 23.5 MB at 32k tokens vs
+2,013 MB for equal-depth multi-head attention.
 
-## Intended use / limitations
-- Research artifact demonstrating KV-minimal + self-remodeling design at small scale.
-- Not yet trained → no quality guarantees until Stage 1+ completes.
-- Pure-SSM recall is weaker than full attention; mitigated by the MLA layers + CLA.
+## Training
+FineWeb-Edu (sample-10BT), SmolLM2 tokenizer, 5B tokens planned, seq 2048, 262k tokens/step,
+Muon + AdamW, WSD schedule, fp16 + loss scaling on T4 (bf16 on Ampere+).
 
-## Training (planned)
-- Data: FineWeb-Edu (streamed), ~50–100B tokens. Tokenizer: reused 32k BPE.
-- Precision: bf16 + grad checkpointing. Resumable across capped sessions via HF Hub.
+## Limitations
+Not yet trained: no quality claims. Four attention layers limit exact long-range recall
+compared with full attention. The self-modeling effect has only been shown on small
+classifiers; the proxy ablation tests whether it transfers to language modeling.
 
 ## Citations
-DeepSeek-V2 MLA; CLA (arXiv 2405.12981); Mamba2 (state-spaces); Zamba2/Hymba hybrids;
-Mixture-of-Depths (2404.02258); Transformer²/SVF (2501.06252); Self-Modeling in Neural
-Networks (Premakumar et al. 2024). Research task `wia4ra29q`, 23/25 claims verified.
+Mamba2 (Dao & Gu 2024) · DeepSeek-V2 MLA · CLA (Brandon et al. 2024) · Kimi Linear (2510.26692)
+· Hybrid design study (2510.04800) · Muon / Moonlight (2502.16982) · Self-modeling
+(Premakumar et al., arXiv 2407.10188) · SmolLM2 tokenizer · FineWeb-Edu.
