@@ -120,6 +120,8 @@ class MetricsLog:
 
 @torch.no_grad()
 def evaluate(model, val_mbs, diag_ids, device, amp_dtype) -> dict:
+    if device.type == "cuda":
+        torch.cuda.empty_cache()   # return training's cached blocks before the eval forward passes
     was = model.training
     model.eval()
     tot, n = 0.0, 0
@@ -248,6 +250,11 @@ def main(argv=None):
     log = MetricsLog(metrics_path, info.is_main, wandb_run)
 
     if tcfg.compile:
+        # every layer shares MorphLayer.forward; each layer variant needs its own compiled graph
+        import torch._dynamo as dynamo   # aliased: a bare `import torch.x` here would make `torch` local to main()
+        dynamo.config.cache_size_limit = max(dynamo.config.cache_size_limit, 4 * mcfg.n_layers)
+        if hasattr(dynamo.config, "recompile_limit"):
+            dynamo.config.recompile_limit = max(dynamo.config.recompile_limit, 4 * mcfg.n_layers)
         for layer in model.model.layers:
             layer.compile()
     ddp = DDP(model, device_ids=[info.local_rank] if device.type == "cuda" else None) if info.enabled else model

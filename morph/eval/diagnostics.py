@@ -73,8 +73,8 @@ def state_diagnostics(model, input_ids: torch.Tensor, amp_dtype=None) -> Dict[st
     model.eval()
     ctx = torch.autocast(input_ids.device.type, dtype=amp_dtype) if amp_dtype else nullcontext()
     with ctx:
-        out = model(input_ids, collect=layers)
-    hidden, collected = out["hidden"], out["collected"]
+        # backbone only: the LM head's full-vocab logits are not needed here (and would cost GBs)
+        hidden, collected, _ = model.model(input_ids, collect=layers)
     res: Dict[str, float] = {}
     pred = None
     if model.self_model is not None:
