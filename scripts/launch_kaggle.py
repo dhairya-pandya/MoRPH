@@ -8,6 +8,7 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py proxy R0 R1              # T4x2: two proxy runs, one per GPU
     python scripts/launch_kaggle.py main                     # T4x2: main run session (resumes from HF Hub)
     python scripts/launch_kaggle.py stage2_xs                # T4x2: MoD vs control, both from proxy R2
+    python scripts/launch_kaggle.py exp modv2-llc            # T4x2: queued experiment batch (see EXPERIMENTS)
     python scripts/launch_kaggle.py status <job>             # kernel status
     python scripts/launch_kaggle.py fetch <job> [dir] [regex|all]  # logs/metrics (all = + checkpoints)
 
@@ -35,6 +36,15 @@ PROXY_RUNS = {
     "R3": ["self_model_lambda=1.0", "self_model_detach=true"],         # mechanism control
     "R4": ["self_model_probe=true", "kv_lora_rank=32"],                # half latent, baseline
     "R5": ["self_model_lambda=1.0", "kv_lora_rank=32"],                # half latent + self-modeling (lambda* from R1/R2)
+}
+
+# experiment batches for the `exp` job: python expression of {gpu: [commands]} evaluated inside the kernel
+EXPERIMENTS = {
+    "modv2-llc": """{
+    0: [mod_run("mod_v2a", ["mod_capacity=0.75", "mod_aux_weight=0.05"])],
+    1: [llc("R0"), llc("R1"), llc("R2"), llc("R3"),
+        mod_run("mod_v2b", ["mod_layers=[5,7]", "mod_capacity=0.5", "mod_aux_weight=0.05"])],
+}""",
 }
 
 HEADER = r'''
@@ -103,6 +113,39 @@ for extra in ["", "--mset ssm_chunk=128"]:
     sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/xs.json --micro 8 {extra}")
 sh(f"cd {SRC} && python -m morph.tools.bench_components --config configs/model/s.json --micro 4")
 ''',
+    "exp": r'''
+# one queue of shell commands per GPU; queues run in parallel, commands within a queue in order
+DATA = data_dir()
+R2 = sorted(glob.glob("/kaggle/input/**/proxy_R2/checkpoints/ckpt_*.pt", recursive=True))[-1]
+CKPTS = {r: sorted(glob.glob(f"/kaggle/input/**/proxy_{r}/checkpoints/ckpt_*.pt", recursive=True))[-1]
+         for r in ("R0", "R1", "R2", "R3")}
+print("checkpoints", CKPTS, flush=True)
+os.makedirs(f"{W}/logs", exist_ok=True)
+os.makedirs(f"{W}/llc", exist_ok=True)
+
+def mod_run(name, msets):
+    m = " ".join(f"--mset '{x}'" for x in msets)
+    return (f"python -m morph.train.pretrain --model_config configs/model/xs_mod.json "
+            f"--train_config configs/train/stage2_mod_xs.json --set run_name={name} --set data_dir={DATA} "
+            f"--set out_dir={W}/runs --set init_from={R2} --set keep_ckpts=1 --set mod_anneal_steps=1000 {m}")
+
+def llc(r):
+    return (f"python -m morph.eval.llc --ckpt {CKPTS[r]} --data_dir {DATA} --seq_len 512 --batch 8 "
+            f"--n_batches 16 --steps 200 --chains 2 --calibrate > {W}/llc/{r}.jsonl")
+
+QUEUES = {QUEUES}
+procs = []
+for gpu, cmds in QUEUES.items():
+    script = " && ".join(f"({c})" for c in cmds)
+    log = open(f"{W}/logs/gpu{gpu}.log", "w")
+    procs.append((gpu, subprocess.Popen(script, shell=True, cwd=SRC, stdout=log, stderr=subprocess.STDOUT,
+                                        env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)))))
+while any(p.poll() is None for _, p in procs):
+    time.sleep(600)
+for gpu, p in procs:
+    print(f"=== gpu{gpu} exit {p.returncode}", flush=True)
+    print("\n".join(open(f"{W}/logs/gpu{gpu}.log").read().splitlines()[-30:]), flush=True)
+''',
     "stage2_xs": r'''
 DATA = data_dir()
 init = sorted(glob.glob("/kaggle/input/**/proxy_R2/checkpoints/ckpt_*.pt", recursive=True))[-1]
@@ -170,6 +213,8 @@ def push(job: str, runs=()):
         body += JOBS["main"].format()
     elif job == "stage2_xs":
         body += JOBS["stage2_xs"]
+    elif job == "exp":
+        body += JOBS["exp"].replace("{QUEUES}", EXPERIMENTS[runs[0]])
     else:
         body += JOBS[job]
     # main run: mount the previous session's output so it can resume without HF Hub
@@ -180,7 +225,8 @@ def push(job: str, runs=()):
         "enable_gpu": job != "prep", "enable_tpu": False,
         "dataset_sources": [], "competition_sources": [], "model_sources": [],
         "kernel_sources": ([] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"]) + chain
-                          + ([f"{user}/morph-proxy-r2-r3"] if job == "stage2_xs" else []),
+                          + ([f"{user}/morph-proxy-r2-r3"] if job in ("stage2_xs", "exp") else [])
+                          + ([f"{user}/morph-proxy-r0-r1"] if job == "exp" else []),
     }
     if job != "prep":
         meta["machine_shape"] = "NvidiaTeslaT4"
@@ -207,6 +253,10 @@ def main(argv):
         if not rest or any(r not in PROXY_RUNS for r in rest) or len(rest) > 2:
             raise SystemExit(f"proxy needs 1-2 of {list(PROXY_RUNS)}")
         push("proxy", rest)
+    elif cmd == "exp":
+        if len(rest) != 1 or rest[0] not in EXPERIMENTS:
+            raise SystemExit(f"exp needs one of {list(EXPERIMENTS)}")
+        push("exp", rest)
     elif cmd == "status":
         subprocess.run([KAGGLE, "kernels", "status", f"{username()}/{rest[0]}"])
     elif cmd == "fetch":
