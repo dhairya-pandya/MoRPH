@@ -64,3 +64,21 @@ SGLD on each final checkpoint: 16 batches × 8 × 512 tokens, γ = 100, nβ = n 
    *raises* the LLC estimate here, the opposite of the paper's RLCT result, while the detached
    control is lowest. A calibrated rerun (γ = 1000, 500 steps, smaller ε) is queued before
    drawing a conclusion.
+
+## Local learning coefficient, calibrated (γ = 1000, 500 steps, 2 chains)
+
+| ε | R0 baseline | R2 λ=1.0 | R3 λ=1.0 detached |
+|---|---|---|---|
+| 1e-6 | 67 | 180 | 68 |
+| 3.3e-6 | 176 | 400 | 169 |
+| 1e-5 | 272 | 566 | 257 |
+| 3e-5 | 296 | 608 | 279 |
+
+8. With stronger localization the estimate is close to flat between ε = 1e-5 and 3e-5 (+8–9%),
+   so these numbers are usable. **Self-modeling with gradients into the targets roughly
+   doubles the LLC (R2 ≈ 2.05× R0); the detached control matches the baseline (R3 ≈ 0.94× R0).**
+   This is the opposite of the paper's RLCT finding. In this LM, self-modeling makes the cached
+   states lower-rank but makes the language-modeling loss basin *more* complex, presumably
+   because tying intermediate states to the output adds constraints the LM loss must satisfy
+   around the solution. The effect follows the same mechanism switch as the rank effect: it
+   appears only when gradients reach the targets.

@@ -35,12 +35,27 @@ Findings:
 | run | routed layers | capacity | aux weight | val CE | Δ vs control | causal val CE | executed (causal) |
 |---|---|---|---|---|---|---|---|
 | v2b | 5, 7 | 0.5 | 0.05 | 3.3635 | +1.11% | 3.3969 (+2.11%) | 50.1% |
-| v2a | 1, 5, 7, 10 | 0.75 | 0.05 | — | — | — | killed at 0.15B tokens (host out of memory) |
+| v2a | 1, 5, 7, 10 | 0.75 | 0.05 | 3.3769 | +1.51% | 3.4095 (+2.49%) | 75.5% |
 
 Routing only two layers halves the loss penalty, but it also skips only ~8% of layer compute;
 the cost per unit of compute saved is no better. The causal-routing gap stays ~1%. Throughput
 from this session is not comparable with the original control (that run hit the compile bug),
 so a control rerun on the fixed code is queued together with v2a.
+
+## Fair throughput (fixed compile, same session)
+
+| run | tok/s |
+|---|---|
+| control rerun (fixed code) | 17.9k (val CE 3.3266, identical to the first control) |
+| v2a (4 layers, capacity 0.75) | 16.8k |
+
+The first control had hit the compile fallback, which made MoD look 19% faster. On the fixed
+code the routed model is *slower* at capacity 0.75: gather/scatter and per-layer routing
+overhead outweigh the skipped compute at this width on a T4. MoD as implemented gives no
+speedup at 44M parameters, and every setting tried costs 1.1–2.3% loss.
+
+**Decision: no MoD for the MORPH-S main run.** Revisit only with fused routing kernels or a
+much wider model where the skipped layer cost dominates the routing overhead.
 
 Options before trying MoD on MORPH-S: route fewer layers or use capacity 0.75, anneal more
 slowly over more tokens, raise the aux weight to shrink the causal gap, and compare against a
