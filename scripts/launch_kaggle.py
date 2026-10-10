@@ -6,7 +6,7 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py prep                     # CPU: tokenize FineWeb-Edu -> shards
     python scripts/launch_kaggle.py gate                     # T4x2: backend parity + throughput
     python scripts/launch_kaggle.py proxy R0 R1              # T4x2: two proxy runs, one per GPU
-    python scripts/launch_kaggle.py main                     # T4x2: main run session (resumes from HF Hub)
+    python scripts/launch_kaggle.py main [--hours 11]        # T4x2: main run session (resumes; --hours caps it)
     python scripts/launch_kaggle.py stage2_xs                # T4x2: MoD vs control, both from proxy R2
     python scripts/launch_kaggle.py exp modv2-llc            # T4x2: queued experiment batch (see EXPERIMENTS)
     python scripts/launch_kaggle.py status <job>             # kernel status
@@ -185,7 +185,7 @@ for name, p in procs:
 DATA = data_dir()
 sh(f"cd {{SRC}} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
    f"--train_config configs/train/main_s.json --set data_dir={{DATA}} --set out_dir={{W}}/runs "
-   f"--set time_limit_hours=11.6 --set reserve_minutes=15 --set 'resume_dirs=[\"/kaggle/input\"]'")
+   f"--set time_limit_hours={HOURS} --set reserve_minutes=15 --set 'resume_dirs=[\"/kaggle/input\"]'")
 ''',
 }
 
@@ -213,7 +213,7 @@ def slug(job: str, runs=()) -> str:
     return name.replace("_", "-")          # Kaggle slugs use dashes
 
 
-def push(job: str, runs=()):
+def push(job: str, runs=(), hours: float = 11.6):
     sha = head_sha()
     user = username()
     s = slug(job, runs)
@@ -221,7 +221,7 @@ def push(job: str, runs=()):
     if job == "proxy":
         body += JOBS["proxy"].format(runs={r: PROXY_RUNS[r] for r in runs})
     elif job == "main":
-        body += JOBS["main"].format()
+        body += JOBS["main"].replace("{HOURS}", str(hours)).format()
     elif job == "stage2_xs":
         body += JOBS["stage2_xs"]
     elif job == "exp":
@@ -258,7 +258,9 @@ def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, rest = argv[0], argv[1:]
-    if cmd in ("prep", "gate", "main", "profile", "stage2_xs"):
+    if cmd == "main" and rest[:1] == ["--hours"]:
+        push("main", hours=float(rest[1]))          # cap a session to the quota that is left
+    elif cmd in ("prep", "gate", "main", "profile", "stage2_xs"):
         push(cmd)
     elif cmd == "proxy":
         if not rest or any(r not in PROXY_RUNS for r in rest) or len(rest) > 2:
