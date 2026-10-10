@@ -30,6 +30,18 @@ Findings:
 5. Both runs hit torch.compile's recompile limit (fixed afterwards), so absolute tok/s is
    below what the fixed code reaches; the ratio between the runs is still fair.
 
+## Gentler settings (v2)
+
+| run | routed layers | capacity | aux weight | val CE | Δ vs control | causal val CE | executed (causal) |
+|---|---|---|---|---|---|---|---|
+| v2b | 5, 7 | 0.5 | 0.05 | 3.3635 | +1.11% | 3.3969 (+2.11%) | 50.1% |
+| v2a | 1, 5, 7, 10 | 0.75 | 0.05 | — | — | — | killed at 0.15B tokens (host out of memory) |
+
+Routing only two layers halves the loss penalty, but it also skips only ~8% of layer compute;
+the cost per unit of compute saved is no better. The causal-routing gap stays ~1%. Throughput
+from this session is not comparable with the original control (that run hit the compile bug),
+so a control rerun on the fixed code is queued together with v2a.
+
 Options before trying MoD on MORPH-S: route fewer layers or use capacity 0.75, anneal more
 slowly over more tokens, raise the aux weight to shrink the causal gap, and compare against a
 compute-matched (not token-matched) control.

@@ -46,3 +46,21 @@ Findings:
 6. Net: self-modeling reliably simplifies the cached-state inputs (lower effective rank, more
    energy in few directions) at a small loss cost, but at this scale that simplification does
    not translate into a better cache-size/quality trade-off.
+
+## Local learning coefficient (the paper's RLCT measure), first pass
+
+SGLD on each final checkpoint: 16 batches × 8 × 512 tokens, γ = 100, nβ = n / log n, 200 steps,
+2 chains, step size ε swept over 1e-5 … 3e-4.
+
+| ε | R0 baseline | R1 λ=0.1 | R2 λ=1.0 | R3 λ=1.0 detached |
+|---|---|---|---|---|
+| 1e-5 | 395 | 521 | 791 | 368 |
+| 3.3e-5 | 1335 | 1504 | 1756 | 1252 |
+| 1e-4 | 2065 | 2107 | 2185 | 1997 |
+| 3e-4 | 2254 | 2283 | 2367 | 2209 |
+
+7. **No ε-plateau yet**, so the absolute values are not trustworthy (the estimate keeps rising
+   with ε). The ordering, however, is the same at every ε: **R2 > R1 > R0 > R3** — self-modeling
+   *raises* the LLC estimate here, the opposite of the paper's RLCT result, while the detached
+   control is lowest. A calibrated rerun (γ = 1000, 500 steps, smaller ε) is queued before
+   drawing a conclusion.

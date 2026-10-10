@@ -45,6 +45,10 @@ EXPERIMENTS = {
     1: [llc("R0"), llc("R1"), llc("R2"), llc("R3"),
         mod_run("mod_v2b", ["mod_layers=[5,7]", "mod_capacity=0.5", "mod_aux_weight=0.05"])],
 }""",
+    "speed-llc2": """{
+    0: [ctrl_run("ctrl_xs2"), mod_run("mod_v2a", ["mod_capacity=0.75", "mod_aux_weight=0.05"])],
+    1: [llc(r, eps="1e-5", gamma="1000", steps="500", tag="_g1000") for r in ("R0", "R2", "R3")],
+}""",
 }
 
 HEADER = r'''
@@ -129,17 +133,24 @@ def mod_run(name, msets):
             f"--train_config configs/train/stage2_mod_xs.json --set run_name={name} --set data_dir={DATA} "
             f"--set out_dir={W}/runs --set init_from={R2} --set keep_ckpts=1 --set mod_anneal_steps=1000 {m}")
 
-def llc(r):
+def ctrl_run(name, msets=()):
+    m = " ".join(f"--mset '{x}'" for x in msets)
+    return (f"python -m morph.train.pretrain --model_config configs/model/xs.json "
+            f"--train_config configs/train/stage2_mod_xs.json --set run_name={name} --set data_dir={DATA} "
+            f"--set out_dir={W}/runs --set init_from={R2} --set keep_ckpts=1 --mset self_model_lambda=1.0 {m}")
+
+def llc(r, eps="1e-4", gamma="100", steps="200", tag=""):
     return (f"python -m morph.eval.llc --ckpt {CKPTS[r]} --data_dir {DATA} --seq_len 512 --batch 8 "
-            f"--n_batches 16 --steps 200 --chains 2 --calibrate > {W}/llc/{r}.jsonl")
+            f"--n_batches 16 --steps {steps} --chains 2 --eps {eps} --gamma {gamma} --calibrate "
+            f"> {W}/llc/{r}{tag}.jsonl")
 
 QUEUES = {QUEUES}
 procs = []
 for gpu, cmds in QUEUES.items():
     script = " && ".join(f"({c})" for c in cmds)
     log = open(f"{W}/logs/gpu{gpu}.log", "w")
-    procs.append((gpu, subprocess.Popen(script, shell=True, cwd=SRC, stdout=log, stderr=subprocess.STDOUT,
-                                        env=dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu)))))
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), TORCHINDUCTOR_COMPILE_THREADS="1")  # limit host RAM
+    procs.append((gpu, subprocess.Popen(script, shell=True, cwd=SRC, stdout=log, stderr=subprocess.STDOUT, env=env)))
 while any(p.poll() is None for _, p in procs):
     time.sleep(600)
 for gpu, p in procs:
