@@ -84,3 +84,16 @@ inference `W_up` can be absorbed into the query and only `c` is stored.
 Continue-training from a Stage-1 checkpoint with `--set init_from=<ckpt>` (only router
 weights may be missing). Eval logs `val_ce` (top-k), `val_ce_causal`, and `mod_exec_causal`
 (fraction of tokens that actually ran the routed layers).
+
+## Stage 3 — SVF experts and two-pass adaptation (`morph/model/svf.py`, `morph/train/svf_train.py`)
+
+```
+ every block linear (mixer + MLP; not embeddings / LM head):  W = U diag(s) Vᵀ   (frozen)
+ expert k = one vector z_k per matrix:                         W' = U diag(s ⊙ z_k) Vᵀ   (z = 1 → base)
+   trained supervised on one domain (next-token CE); MORPH-S: ~45k numbers per expert vs 170M weights
+
+ pass 1: prompt (first 128 tokens) → base model → mean-pooled final hidden → linear router → α (softmax)
+ pass 2: z = Σ_k α_k z_k   ("general" = identity z, so the router can fall back to the base model)
+```
+`svf_train.py evaluate` reports, per domain, the CE of the base model, of every expert, of the
+domain's own expert (oracle) and of the router-mixed two-pass model, plus routing accuracy.

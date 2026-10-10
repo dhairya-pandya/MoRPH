@@ -1,4 +1,4 @@
-"""Tokenize FineWeb-Edu into uint16 token shards (run once, CPU only).
+"""Tokenize a Hugging Face text dataset (default FineWeb-Edu) into uint16 token shards (CPU only).
 
 Output layout (`--out`):
     train_00000.bin ...   raw little-endian uint16 tokens, docs separated by EOS
@@ -96,19 +96,43 @@ def write_shards(docs: Iterable[List[int]], out_dir: str, eos_id: int, train_tok
     return meta
 
 
-def fineweb_docs(tokenizer, repo: str, subdir: str, batch_docs: int, cache_dir: str) -> Iterator[List[int]]:
-    """Stream parquet files of `repo/subdir` in sorted order, yield tokenized docs."""
-    import pyarrow.parquet as pq
+def _text_batches(local: str, column: str, batch_docs: int) -> Iterator[List[str]]:
+    """Batches of texts from one downloaded file: parquet, or JSON lines (optionally gzipped)."""
+    if local.endswith(".parquet"):
+        import pyarrow.parquet as pq
+        for batch in pq.ParquetFile(local).iter_batches(batch_size=batch_docs, columns=[column]):
+            yield batch.column(0).to_pylist()
+        return
+    import gzip
+    opener = gzip.open if local.endswith(".gz") else open
+    buf: List[str] = []
+    with opener(local, "rt", encoding="utf-8") as f:
+        for line in f:
+            buf.append(json.loads(line)[column])
+            if len(buf) == batch_docs:
+                yield buf
+                buf = []
+    if buf:
+        yield buf
+
+
+DOC_SUFFIXES = (".parquet", ".jsonl", ".jsonl.gz", ".json.gz")
+
+
+def hf_docs(tokenizer, repo: str, subdir: str, batch_docs: int, cache_dir: str,
+            column: str = "text") -> Iterator[List[int]]:
+    """Stream the data files of `repo/subdir` in sorted order, yield tokenized docs (text in `column`)."""
     from huggingface_hub import HfApi, hf_hub_download
 
-    files = sorted(f.path for f in HfApi().list_repo_tree(repo, path_in_repo=subdir, repo_type="dataset")
-                   if f.path.endswith(".parquet"))
+    files = sorted(f.path for f in HfApi().list_repo_tree(repo, path_in_repo=subdir or None, repo_type="dataset",
+                                                          recursive=True)
+                   if f.path.endswith(DOC_SUFFIXES))
+    if not files:
+        raise ValueError(f"no {DOC_SUFFIXES} files under {repo}/{subdir}")
     for fi, path in enumerate(files):
         t0 = time.time()
         local = hf_hub_download(repo, path, repo_type="dataset", cache_dir=cache_dir)
-        pf = pq.ParquetFile(local)
-        for batch in pf.iter_batches(batch_size=batch_docs, columns=["text"]):
-            texts = batch.column(0).to_pylist()
+        for texts in _text_batches(local, column, batch_docs):
             for enc in tokenizer.encode_batch(texts, add_special_tokens=False):
                 yield enc.ids
         print(f"[prepare] finished {path} ({fi + 1}/{len(files)}) in {time.time() - t0:.0f}s", flush=True)
@@ -123,7 +147,8 @@ def main(argv=None):
     ap.add_argument("--out", required=True)
     ap.add_argument("--tokenizer", default="HuggingFaceTB/SmolLM2-135M")
     ap.add_argument("--dataset", default="HuggingFaceFW/fineweb-edu")
-    ap.add_argument("--subdir", default="sample/10BT")
+    ap.add_argument("--subdir", default="sample/10BT", help="folder inside the dataset repo ('' = whole repo)")
+    ap.add_argument("--column", default="text", help="field holding the document text")
     ap.add_argument("--train_tokens", type=float, default=5.2e9)
     ap.add_argument("--val_tokens", type=float, default=5e6)
     ap.add_argument("--val_every", type=int, default=1000)
@@ -139,7 +164,7 @@ def main(argv=None):
         raise ValueError("tokenizer has no <|endoftext|> token")
     t0 = time.time()
     meta = write_shards(
-        fineweb_docs(tok, args.dataset, args.subdir, args.batch_docs, args.cache_dir),
+        hf_docs(tok, args.dataset, args.subdir, args.batch_docs, args.cache_dir, args.column),
         args.out, eos_id=eos, train_tokens=int(args.train_tokens), val_every=args.val_every,
         val_tokens=int(args.val_tokens), shard_tokens=int(args.shard_tokens),
         meta_extra={"tokenizer": args.tokenizer, "vocab_size": tok.get_vocab_size(),

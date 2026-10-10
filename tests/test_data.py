@@ -69,3 +69,19 @@ def test_shardset_windows_stay_inside_shards():
         assert ds.n_windows == sum((1000 - 1) // 64 for _ in range(3))
         w = ds.window(ds.n_windows - 1)
         assert len(w) == 65
+
+
+def test_text_batches_reads_parquet_and_gzipped_jsonl():
+    import gzip
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from morph.data.prepare import _text_batches
+    with tempfile.TemporaryDirectory() as d:
+        texts = [f"doc {i}" for i in range(7)]
+        pq.write_table(pa.table({"text": texts, "x": list(range(7))}), f"{d}/a.parquet")
+        with gzip.open(f"{d}/b.json.gz", "wt") as f:
+            for t in texts:
+                f.write(json.dumps({"content": t}) + "\n")
+        got_pq = [t for b in _text_batches(f"{d}/a.parquet", "text", 3) for t in b]
+        got_js = [t for b in _text_batches(f"{d}/b.json.gz", "content", 3) for t in b]
+        assert got_pq == texts and got_js == texts

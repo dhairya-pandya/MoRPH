@@ -45,6 +45,12 @@ EXPERIMENTS = {
     1: [llc("R0"), llc("R1"), llc("R2"), llc("R3"),
         mod_run("mod_v2b", ["mod_layers=[5,7]", "mod_capacity=0.5", "mod_aux_weight=0.05"])],
 }""",
+    "svf-xs": """{
+    0: [prep_domain("math", "open-web-math/open-web-math", "data", "text"), svf_expert("math"),
+        prep_domain("code", "codeparrot/codeparrot-clean", "", "content"), svf_expert("code")],
+    1: [prep_domain("stories", "roneneldan/TinyStories", "data", "text"), svf_expert("stories")],
+    "after": [svf_router_eval(["math", "code", "stories"])],
+}""",
     "speed-llc2": """{
     0: [ctrl_run("ctrl_xs2"), mod_run("mod_v2a", ["mod_capacity=0.75", "mod_aux_weight=0.05"])],
     1: [llc(r, eps="1e-5", gamma="1000", steps="500", tag="_g1000") for r in ("R0", "R2", "R3")],
@@ -144,7 +150,26 @@ def llc(r, eps="1e-4", gamma="100", steps="200", tag=""):
             f"--n_batches 16 --steps {steps} --chains 2 --eps {eps} --gamma {gamma} --calibrate "
             f"> {W}/llc/{r}{tag}.jsonl")
 
+def prep_domain(name, repo, subdir, column, tokens="8e6"):
+    return (f"python -m morph.data.prepare --out {W}/domains/{name} --dataset {repo} --subdir '{subdir}' "
+            f"--column {column} --train_tokens {tokens} --val_tokens 5e5 --val_every 20 --shard_tokens 5e7 "
+            f"--batch_docs 500 --cache_dir /tmp/hf")
+
+def svf_expert(name, steps=300):
+    return (f"python -m morph.train.svf_train expert --base {R2} --domain {name}={W}/domains/{name} "
+            f"--general {DATA} --out {W}/experts/{name}.safetensors --steps {steps} --batch 16 --micro 8 "
+            f"--seq 1024 --lr 2e-3 --eval_every 50 --eval_windows 64")
+
+def svf_router_eval(names):
+    doms = " ".join([f"general={DATA}"] + [f"{n}={W}/domains/{n}" for n in names])
+    exps = " ".join(f"{n}={W}/experts/{n}.safetensors" for n in names)
+    return (f"python -m morph.train.svf_train router --base {R2} --domains {doms} --out {W}/experts/router.pt "
+            f"&& python -m morph.train.svf_train evaluate --base {R2} --domains {doms} --experts {exps} "
+            f"--router {W}/experts/router.pt --n_eval 64 --out {W}/experts/svf_eval.json")
+
+os.makedirs(f"{W}/experts", exist_ok=True)
 QUEUES = {QUEUES}
+AFTER = QUEUES.pop("after", [])
 procs = []
 for gpu, cmds in QUEUES.items():
     script = " && ".join(f"({c})" for c in cmds)
@@ -156,6 +181,8 @@ while any(p.poll() is None for _, p in procs):
 for gpu, p in procs:
     print(f"=== gpu{gpu} exit {p.returncode}", flush=True)
     print("\n".join(open(f"{W}/logs/gpu{gpu}.log").read().splitlines()[-30:]), flush=True)
+for c in AFTER:                      # steps that need every queue's results (run on GPU 0)
+    sh(f"cd {SRC} && CUDA_VISIBLE_DEVICES=0 {c} 2>&1 | tee -a {W}/logs/after.log")
 ''',
     "stage2_xs": r'''
 DATA = data_dir()

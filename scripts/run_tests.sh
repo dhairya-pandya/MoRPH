@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/.."
 PYTHONPATH=. python3 - <<'PY'
 import importlib, time, traceback
-mods = ["tests.test_model", "tests.test_data", "tests.test_train", "tests.test_mod"]
+mods = ["tests.test_model", "tests.test_data", "tests.test_train", "tests.test_mod", "tests.test_svf"]
 n = fails = 0
 for m in mods:
     mod = importlib.import_module(m)
