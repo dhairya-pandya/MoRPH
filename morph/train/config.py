@@ -53,6 +53,7 @@ class TrainConfig:
     hub_repo: str = ""                    # e.g. user/morph-runs (private); needs HF_TOKEN
     hub_keep: int = 2
     resume_dirs: List[str] = field(default_factory=list)
+    require_resume: bool = False          # stop instead of starting from scratch when no checkpoint is found
 
     # stage-2+ continued training
     init_from: str = ""                   # weights to start from when no resume checkpoint exists:

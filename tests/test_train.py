@@ -94,3 +94,13 @@ def test_resume_from_previous_session_output_dir():
         lines = open(os.path.join(new, "proxy_xs", "metrics.jsonl")).read().splitlines()
         steps = [json.loads(l)["step"] for l in lines if '"train"' in l]
         assert steps[0] == 1 and steps[-1] == 6
+
+
+def test_require_resume_stops_instead_of_starting_from_scratch():
+    with tempfile.TemporaryDirectory() as a:
+        try:
+            pretrain_main(_args(a, "--set", "max_steps=1", "--set", "require_resume=true"))
+        except SystemExit as e:
+            assert "require_resume" in str(e)
+        else:
+            raise AssertionError("training started without a checkpoint")

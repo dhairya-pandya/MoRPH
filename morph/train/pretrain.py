@@ -210,6 +210,8 @@ def main(argv=None):
         box = [path]
         dist.broadcast_object_list(box, src=0)
         path = box[0]
+    if not path and tcfg.require_resume:
+        raise SystemExit(f"require_resume: no checkpoint in {ckpt_dir}, {tcfg.resume_dirs} or the hub")
     if path:
         ck = torch.load(path, map_location="cpu", weights_only=False)
         if ck["arch_hash"] != mcfg.arch_hash():

@@ -9,6 +9,7 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py main [--hours 11]        # T4x2: main run session (resumes; --hours caps it)
     python scripts/launch_kaggle.py stage2_xs                # T4x2: MoD vs control, both from proxy R2
     python scripts/launch_kaggle.py exp modv2-llc            # T4x2: queued experiment batch (see EXPERIMENTS)
+    python scripts/launch_kaggle.py backup                   # newest ckpt of the latest (COMPLETE) main session -> private dataset
     python scripts/launch_kaggle.py status <job>             # kernel status
     python scripts/launch_kaggle.py fetch <job> [dir] [regex|all]  # logs/metrics (all = + checkpoints)
 
@@ -27,6 +28,7 @@ KAGGLE = os.path.expanduser("~/.local/bin/kaggle")
 REPO_URL = "https://github.com/dhairya-pandya/MoRPH.git"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_KERNEL = "morph-data-prep"
+CKPT_DATASET = "morph-main-ckpt"     # private dataset holding the newest good main-run checkpoint
 
 # proxy ablation grid (XS, 0.5B tokens); values are MorphConfig overrides
 PROXY_RUNS = {
@@ -212,7 +214,7 @@ for name, p in procs:
 DATA = data_dir()
 sh(f"cd {{SRC}} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
    f"--train_config configs/train/main_s.json --set data_dir={{DATA}} --set out_dir={{W}}/runs "
-   f"--set time_limit_hours={HOURS} --set reserve_minutes=15 --set 'resume_dirs=[\"/kaggle/input\"]'")
+   f"--set time_limit_hours={HOURS} --set reserve_minutes=15 --set require_resume=true --set 'resume_dirs=[\"/kaggle/input\"]'")
 ''',
 }
 
@@ -228,6 +230,42 @@ def head_sha() -> str:
 def username() -> str:
     with open(os.path.expanduser("~/.kaggle/kaggle.json")) as f:
         return json.load(f)["username"]
+
+
+def dataset_exists(user: str, name: str) -> bool:
+    r = subprocess.run([KAGGLE, "datasets", "status", f"{user}/{name}"], capture_output=True, text=True)
+    return r.returncode == 0 and "ready" in r.stdout.lower()
+
+
+def backup_checkpoint():
+    """Copy the newest checkpoint of the latest main-run version (must be COMPLETE) into the private dataset.
+
+    A main session killed by the quota loses its output, and the next session's self-input then
+    has no checkpoint; the dataset keeps the last good one reachable."""
+    user = username()
+    work = os.path.join(ROOT, "kaggle_out", "ckpt_backup")
+    os.makedirs(work, exist_ok=True)
+    for f in os.listdir(work):
+        os.remove(os.path.join(work, f))
+    st = subprocess.run([KAGGLE, "kernels", "status", f"{user}/morph-main"], capture_output=True, text=True).stdout
+    if "COMPLETE" not in st:
+        raise SystemExit(f"latest morph-main version is not COMPLETE ({st.strip()}); nothing safe to back up")
+    dl = os.path.join(ROOT, "kaggle_out", "main_latest")
+    subprocess.run([KAGGLE, "kernels", "output", f"{user}/morph-main", "-p", dl,
+                    "--file-pattern", r".*ckpt_\d+\.pt$"], check=True)
+    import glob
+    ck = sorted(glob.glob(os.path.join(dl, "**", "ckpt_*.pt"), recursive=True))
+    if not ck:
+        raise SystemExit("no checkpoint in the latest morph-main output")
+    os.replace(ck[-1], os.path.join(work, os.path.basename(ck[-1])))
+    with open(os.path.join(work, "dataset-metadata.json"), "w") as f:
+        json.dump({"title": CKPT_DATASET, "id": f"{user}/{CKPT_DATASET}", "licenses": [{"name": "other"}]}, f)
+    if dataset_exists(user, CKPT_DATASET):
+        cmd = [KAGGLE, "datasets", "version", "-p", work, "-m", f"checkpoint {os.path.basename(ck[-1])}"]
+    else:
+        cmd = [KAGGLE, "datasets", "create", "-p", work]           # private by default
+    subprocess.run(cmd, check=True)
+    print(f"backed up {os.path.basename(ck[-1])} to {user}/{CKPT_DATASET}")
 
 
 def kernel_exists(user: str, s: str) -> bool:
@@ -261,7 +299,8 @@ def push(job: str, runs=(), hours: float = 11.6):
         "id": f"{user}/{s}", "title": s, "code_file": "job.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_internet": True,
         "enable_gpu": job != "prep", "enable_tpu": False,
-        "dataset_sources": [], "competition_sources": [], "model_sources": [],
+        "dataset_sources": [f"{user}/{CKPT_DATASET}"] if job == "main" and dataset_exists(user, CKPT_DATASET) else [],
+        "competition_sources": [], "model_sources": [],
         "kernel_sources": ([] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"]) + chain
                           + ([f"{user}/morph-proxy-r2-r3"] if job in ("stage2_xs", "exp") else [])
                           + ([f"{user}/morph-proxy-r0-r1"] if job == "exp" else []),
@@ -297,6 +336,8 @@ def main(argv):
         if len(rest) != 1 or rest[0] not in EXPERIMENTS:
             raise SystemExit(f"exp needs one of {list(EXPERIMENTS)}")
         push("exp", rest)
+    elif cmd == "backup":
+        backup_checkpoint()
     elif cmd == "status":
         subprocess.run([KAGGLE, "kernels", "status", f"{username()}/{rest[0]}"])
     elif cmd == "fetch":
