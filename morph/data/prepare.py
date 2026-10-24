@@ -24,10 +24,11 @@ META = "meta.json"
 
 
 class ShardWriter:
-    """Accumulates token ids and writes fixed-size uint16 shards."""
+    """Accumulates token ids (or per-token masks) and writes fixed-size shards."""
 
-    def __init__(self, out_dir: str, prefix: str, shard_tokens: int):
+    def __init__(self, out_dir: str, prefix: str, shard_tokens: int, dtype: str = "<u2", suffix: str = ".bin"):
         self.out_dir, self.prefix, self.shard_tokens = out_dir, prefix, int(shard_tokens)
+        self.dtype, self.suffix = dtype, suffix
         self.buf: List[np.ndarray] = []
         self.buf_len = 0
         self.counts: List[int] = []
@@ -44,9 +45,9 @@ class ShardWriter:
             self.buf, self.buf_len = ([rest] if len(rest) else []), len(rest)
 
     def _write(self, arr: np.ndarray):
-        name = f"{self.prefix}_{len(self.counts):05d}.bin"
+        name = f"{self.prefix}_{len(self.counts):05d}{self.suffix}"
         tmp = os.path.join(self.out_dir, name + ".tmp")
-        arr.astype("<u2").tofile(tmp)
+        arr.astype(self.dtype).tofile(tmp)
         os.replace(tmp, os.path.join(self.out_dir, name))
         self.counts.append(int(len(arr)))
 
@@ -56,7 +57,7 @@ class ShardWriter:
             self.buf, self.buf_len = [], 0
 
     def files(self) -> List[str]:
-        return [f"{self.prefix}_{i:05d}.bin" for i in range(len(self.counts))]
+        return [f"{self.prefix}_{i:05d}{self.suffix}" for i in range(len(self.counts))]
 
 
 def write_shards(docs: Iterable[List[int]], out_dir: str, eos_id: int, train_tokens: int,

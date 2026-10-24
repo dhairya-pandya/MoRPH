@@ -27,7 +27,7 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from morph.data.shards import ShardSet, SyntheticSet, WindowSampler, micro_batches, val_batches
+from morph.data.shards import ShardSet, SyntheticSet, WindowSampler, inputs_targets, micro_batches, val_batches
 from morph.eval.diagnostics import state_diagnostics
 from morph.model import MorphConfig, MorphForCausalLM
 from morph.train import distributed as D
@@ -126,21 +126,23 @@ def evaluate(model, val_mbs, diag_ids, device, amp_dtype) -> dict:
     model.eval()
     tot, n = 0.0, 0
     for mb in val_mbs:
-        mb = mb.to(device)
+        x, y = inputs_targets(mb, device)
         with autocast_ctx(device, amp_dtype):
-            out = model(mb[:, :-1], mb[:, 1:])
-        tot += float(out["ce"]) * mb.size(0)
-        n += mb.size(0)
+            out = model(x, y)
+        k = float((y != -100).sum())
+        tot += float(out["ce"]) * k
+        n += k
     res = {"val_ce": tot / max(1, n)}
     res["val_ppl"] = float(torch.tensor(res["val_ce"]).exp())
     if model.cfg.mod_enabled:   # generation-safe routing: per-token router threshold, no top-k
         tot, n, fr = 0.0, 0, []
         for mb in val_mbs[: max(1, len(val_mbs) // 4)]:
-            mb = mb.to(device)
+            x, y = inputs_targets(mb, device)
             with autocast_ctx(device, amp_dtype):
-                out = model(mb[:, :-1], mb[:, 1:], mod_mode="causal")
-            tot += float(out["ce"]) * mb.size(0)
-            n += mb.size(0)
+                out = model(x, y, mod_mode="causal")
+            k = float((y != -100).sum())
+            tot += float(out["ce"]) * k
+            n += k
             fr.append(sum(out["mod_frac"].values()) / len(out["mod_frac"]))
         res["val_ce_causal"] = tot / max(1, n)
         res["mod_exec_causal"] = sum(fr) / len(fr)
@@ -337,11 +339,11 @@ def main(argv=None):
         mbs = micro_batches(train_ds, sampler, step, info.rank, info.world, micro)
         sums.zero_()
         for i, mb in enumerate(mbs):
-            mb = mb.to(device, non_blocking=True)
+            x, y = inputs_targets(mb, device)
             sync = ddp.no_sync() if (info.enabled and i < len(mbs) - 1) else nullcontext()
             with sync:
                 with autocast_ctx(device, amp_dtype):
-                    out = ddp(mb[:, :-1], mb[:, 1:], sm_lambda=lam, mod_capacity=cap)
+                    out = ddp(x, y, sm_lambda=lam, mod_capacity=cap)
                 scaler.scale(out["loss"] / accum).backward()
             sums += torch.stack([out["loss"].detach().float(), out["ce"].float(),
                                  out.get("sm_loss", torch.zeros((), device=device)).float(),

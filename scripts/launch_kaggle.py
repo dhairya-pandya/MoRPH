@@ -6,6 +6,8 @@ one job, and leaves its artifacts in /kaggle/working (the kernel output).
     python scripts/launch_kaggle.py prep                     # CPU: tokenize FineWeb-Edu -> shards
     python scripts/launch_kaggle.py gate                     # T4x2: backend parity + throughput
     python scripts/launch_kaggle.py proxy R0 R1              # T4x2: two proxy runs, one per GPU
+    python scripts/launch_kaggle.py sft-prep                 # CPU: chat data -> masked shards
+    python scripts/launch_kaggle.py sft                      # T4x2: SFT from the newest main checkpoint + samples
     python scripts/launch_kaggle.py main [--hours 11]        # T4x2: main run session (resumes; --hours caps it)
     python scripts/launch_kaggle.py stage2_xs                # T4x2: MoD vs control, both from proxy R2
     python scripts/launch_kaggle.py exp modv2-llc            # T4x2: queued experiment batch (see EXPERIMENTS)
@@ -91,6 +93,21 @@ def data_dir():
 JOBS = {
     "prep": r'''
 sh(f"cd {SRC} && python -m morph.data.prepare --out {W}/data --cache_dir /tmp/hf --train_tokens 5.2e9")
+''',
+    "sft-prep": r'''
+sh(f"cd {SRC} && python -m morph.data.sft --out {W}/sft --max_tokens 3e8 --cache_dir /tmp/hf")
+''',
+    "sft": r'''
+SFT = os.path.dirname(glob.glob("/kaggle/input/**/sft/meta.json", recursive=True)[0])
+ck = sorted(glob.glob("/kaggle/input/**/main_s/checkpoints/ckpt_*.pt", recursive=True),
+            key=lambda p: int(p.rsplit("_", 1)[1].split(".")[0]))[-1]
+print("init_from", ck, flush=True)
+sh(f"cd {SRC} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_config configs/model/s.json "
+   f"--train_config configs/train/sft_s.json --set data_dir={SFT} --set out_dir={W}/runs --set init_from={ck} "
+   f"--set 'resume_dirs=[\"/kaggle/input\"]'")
+sh(f"cd {SRC} && python -m morph.eval.generate --ckpt $(ls {W}/runs/sft_s/checkpoints/ckpt_*.pt | tail -1) --chat "
+   f"--prompt 'What is photosynthesis?' --prompt 'Write a haiku about the sea.' "
+   f"--prompt 'Give me three tips for learning Python.' | tee {W}/sft_samples.txt")
 ''',
     "gate": r'''
 sh("pip install -q flash-linear-attention || true")
@@ -294,18 +311,19 @@ def push(job: str, runs=(), hours: float = 11.6):
     else:
         body += JOBS[job]
     # main run: mount the previous session's output so it can resume without HF Hub
-    chain = [f"{user}/{s}"] if job == "main" and kernel_exists(user, s) else []
+    chain = [f"{user}/{s}"] if job in ("main", "sft") and kernel_exists(user, s) else []
     meta = {
         "id": f"{user}/{s}", "title": s, "code_file": "job.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_internet": True,
-        "enable_gpu": job != "prep", "enable_tpu": False,
+        "enable_gpu": job not in ("prep", "sft-prep"), "enable_tpu": False,
         "dataset_sources": [f"{user}/{CKPT_DATASET}"] if job == "main" and dataset_exists(user, CKPT_DATASET) else [],
         "competition_sources": [], "model_sources": [],
-        "kernel_sources": ([] if job in ("prep", "gate", "profile") else [f"{user}/{DATA_KERNEL}"]) + chain
+        "kernel_sources": ([] if job in ("prep", "gate", "profile", "sft-prep", "sft") else [f"{user}/{DATA_KERNEL}"]) + chain
+                          + ([f"{user}/morph-sft-prep", f"{user}/morph-main"] if job == "sft" else [])
                           + ([f"{user}/morph-proxy-r2-r3"] if job in ("stage2_xs", "exp") else [])
                           + ([f"{user}/morph-proxy-r0-r1"] if job == "exp" else []),
     }
-    if job != "prep":
+    if job not in ("prep", "sft-prep"):
         meta["machine_shape"] = "NvidiaTeslaT4"
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, "job.py"), "w") as f:
@@ -324,7 +342,9 @@ def main(argv):
     if not argv:
         raise SystemExit(__doc__)
     cmd, rest = argv[0], argv[1:]
-    if cmd == "main" and rest[:1] == ["--hours"]:
+    if cmd in ("sft-prep", "sft"):
+        push(cmd)
+    elif cmd == "main" and rest[:1] == ["--hours"]:
         push("main", hours=float(rest[1]))          # cap a session to the quota that is left
     elif cmd in ("prep", "gate", "main", "profile", "stage2_xs"):
         push(cmd)

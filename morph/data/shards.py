@@ -28,16 +28,26 @@ class ShardSet:
         info = self.meta[split]
         self.seq_len = seq_len
         self.arrays = [np.memmap(os.path.join(data_dir, fn), dtype=np.uint16, mode="r") for fn in info["files"]]
+        # SFT data: a per-token loss mask (1 = learn this target) stored next to the tokens
+        self.masks = ([np.memmap(os.path.join(data_dir, fn), dtype=np.uint8, mode="r") for fn in info["mask_files"]]
+                      if self.meta.get("masked") else None)
         per = np.array([max(0, (len(a) - 1) // seq_len) for a in self.arrays], dtype=np.int64)
         self.starts = np.concatenate([[0], np.cumsum(per)])
         self.n_windows = int(self.starts[-1])
         if self.n_windows == 0:
             raise ValueError(f"no {split} windows of length {seq_len + 1} in {data_dir}")
 
-    def window(self, wid: int) -> np.ndarray:
+    def _locate(self, wid: int):
         s = int(np.searchsorted(self.starts, wid, side="right") - 1)
-        off = (wid - int(self.starts[s])) * self.seq_len
+        return s, (wid - int(self.starts[s])) * self.seq_len
+
+    def window(self, wid: int) -> np.ndarray:
+        s, off = self._locate(wid)
         return np.asarray(self.arrays[s][off: off + self.seq_len + 1], dtype=np.int64)
+
+    def window_mask(self, wid: int) -> np.ndarray:
+        s, off = self._locate(wid)
+        return np.asarray(self.masks[s][off: off + self.seq_len + 1], dtype=np.bool_)
 
 
 class SyntheticSet:
@@ -73,16 +83,32 @@ class WindowSampler:
         return step * self.G / self.n
 
 
-def micro_batches(ds, sampler: WindowSampler, step: int, rank: int, world: int, micro: int) -> List[torch.Tensor]:
+def _stack(ds, ids: List[int]):
+    """Tensor of windows, or (windows, masks) when the dataset carries a loss mask."""
+    tok = torch.from_numpy(np.stack([ds.window(w) for w in ids]))
+    if getattr(ds, "masks", None) is None:
+        return tok
+    return tok, torch.from_numpy(np.stack([ds.window_mask(w) for w in ids]))
+
+
+def micro_batches(ds, sampler: WindowSampler, step: int, rank: int, world: int, micro: int) -> List:
     ids = sampler.step_ids(step)[rank::world]
     if len(ids) % micro:
         raise ValueError(f"per-rank batch {len(ids)} not divisible by micro-batch {micro}")
-    rows = [ds.window(w) for w in ids]
-    return [torch.from_numpy(np.stack(rows[i: i + micro])) for i in range(0, len(rows), micro)]
+    return [_stack(ds, ids[i: i + micro]) for i in range(0, len(ids), micro)]
 
 
-def val_batches(ds, n_windows: int, micro: int) -> List[torch.Tensor]:
+def val_batches(ds, n_windows: int, micro: int) -> List:
     """First `n_windows` validation windows in order (fixed across evals and runs)."""
     n = min(n_windows, ds.n_windows)
-    rows = [ds.window(w) for w in range(n)]
-    return [torch.from_numpy(np.stack(rows[i: i + micro])) for i in range(0, n, micro)]
+    return [_stack(ds, list(range(i, min(n, i + micro)))) for i in range(0, n, micro)]
+
+
+def inputs_targets(mb, device):
+    """Model inputs and next-token targets; masked-out targets become -100 (ignored)."""
+    tok, mask = (mb, None) if torch.is_tensor(mb) else mb
+    tok = tok.to(device, non_blocking=True)
+    x, y = tok[:, :-1], tok[:, 1:]
+    if mask is not None:
+        y = y.masked_fill(~mask[:, 1:].to(device), -100)
+    return x, y

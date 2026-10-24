@@ -97,3 +97,14 @@ weights may be missing). Eval logs `val_ce` (top-k), `val_ce_causal`, and `mod_e
 ```
 `svf_train.py evaluate` reports, per domain, the CE of the base model, of every expert, of the
 domain's own expert (oracle) and of the router-mixed two-pass model, plus routing accuracy.
+
+## Stage 4 — instruction tuning (`morph/data/sft.py`, `configs/train/sft_s.json`)
+
+```
+ conversation → ChatML  <|im_start|>role\n content <|im_end|>\n   (SmolLM2 tokenizer ids 1 / 2)
+ loss mask    → 1 on assistant replies and their <|im_end|>, 0 on system / user / headers
+ packing      → conversations back to back, EOS-separated, 2048-token windows; uint8 mask shards
+ training     → same trainer (init_from the main checkpoint), masked targets = -100
+ data         → HuggingFaceTB/smol-smoltalk (SmolLM2's SFT mix for 135M–360M models), 0.15B tokens
+```
+`python -m morph.eval.generate --ckpt CKPT --chat --prompt "..."` samples a reply.
