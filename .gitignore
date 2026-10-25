@@ -11,5 +11,5 @@ data_cache/
 PROGRESS.md
 .env
 kaggle_out/
-runs/
-data/
+/runs/
+/data/
