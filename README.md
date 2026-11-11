@@ -58,7 +58,7 @@ latent (does self-modeling protect a smaller cache?).
 ## Run it
 
 ```bash
-# CPU gate (20 tests: SSD parity, causality, CLA, self-model grads, exact resume, DDP)
+# CPU gate (37 tests: SSD parity, causality, CLA, self-model grads, exact resume, DDP)
 bash scripts/run_tests.sh
 
 # data: FineWeb-Edu -> uint16 shards, SmolLM2 tokenizer (CPU, ~5.2B tokens)
@@ -77,7 +77,7 @@ Kaggle secret `HF_TOKEN` is attached.
 ## Status
 
 `[x]` v2 architecture + pipeline · `[x]` data (5.2B tokens) · `[x]` proxy ablation (R0–R5,
-[results](docs/results/proxy_ablation.md)) · `[~]` main run MORPH-S (3B tokens, starts at quota reset) · `[x]` MoD (implemented; [XS result](docs/results/stage2_mod_xs.md): no speedup on T4, +1–2% loss → not used) · `[x]` SVF ([XS result](docs/results/stage3_svf_xs.md): 23k-number experts, −4 to −16% domain loss, two-pass router keeps general text within 0.2%) · `[~]` SFT (implemented + tested; data prep on Kaggle) · `[ ]` publish
+[results](docs/results/proxy_ablation.md)) · `[~]` main run MORPH-S (2.62B of 3B tokens, val ppl 19.0, [progress](docs/results/main_run_s.md)) · `[x]` MoD (implemented; [XS result](docs/results/stage2_mod_xs.md): no speedup on T4, +1–2% loss → not used) · `[x]` SVF ([XS result](docs/results/stage3_svf_xs.md): 23k-number experts, −4 to −16% domain loss, two-pass router keeps general text within 0.2%) · `[~]` SFT (implemented + tested; data prep on Kaggle) · `[ ]` publish
 
 <details><summary>Credits</summary>
 
