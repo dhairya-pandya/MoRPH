@@ -207,7 +207,7 @@ def main(argv=None):
 
     # ---- resume ----
     step, tokens = 0, 0
-    path = find_resume(ckpt_dir, tcfg.resume_dirs, hub) if info.is_main else None
+    path = find_resume(ckpt_dir, tcfg.resume_dirs, hub, tcfg.run_name) if info.is_main else None
     if info.enabled:
         box = [path]
         dist.broadcast_object_list(box, src=0)

@@ -315,7 +315,7 @@ def push(job: str, runs=(), hours: float = 11.6):
     else:
         body += JOBS[job]
     # main run: mount the previous session's output so it can resume without HF Hub
-    chain = [f"{user}/{s}"] if job in ("main", "sft") and kernel_exists(user, s) else []
+    chain = [f"{user}/{s}"] if job == "main" and kernel_exists(user, s) else []   # SFT fits one session
     meta = {
         "id": f"{user}/{s}", "title": s, "code_file": "job.py", "language": "python",
         "kernel_type": "script", "is_private": True, "enable_internet": True,

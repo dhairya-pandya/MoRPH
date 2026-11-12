@@ -104,3 +104,18 @@ def test_require_resume_stops_instead_of_starting_from_scratch():
             assert "require_resume" in str(e)
         else:
             raise AssertionError("training started without a checkpoint")
+
+
+def test_resume_ignores_other_runs_checkpoints_in_resume_dirs():
+    from morph.train.checkpoint import find_resume
+    with tempfile.TemporaryDirectory() as d:
+        own = os.path.join(d, "work", "runs", "sft_s", "checkpoints")
+        other = os.path.join(d, "input", "morph-main", "runs", "main_s", "checkpoints")
+        prev = os.path.join(d, "input", "morph-sft", "runs", "sft_s", "checkpoints")
+        for p in (own, other):
+            os.makedirs(p)
+        open(os.path.join(other, "ckpt_0011445.pt"), "w").close()
+        assert find_resume(own, [os.path.join(d, "input")], None, "sft_s") is None
+        os.makedirs(prev)
+        open(os.path.join(prev, "ckpt_0000500.pt"), "w").close()
+        assert find_resume(own, [os.path.join(d, "input")], None, "sft_s").endswith("sft_s/checkpoints/ckpt_0000500.pt")

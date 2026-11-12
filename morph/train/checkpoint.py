@@ -108,9 +108,21 @@ class Hub:
             return None
 
 
-def find_resume(ckpt_dir: str, extra_dirs: List[str], hub: Optional[Hub]) -> Optional[str]:
-    """Path of the newest checkpoint (downloading from the hub if that is newest)."""
-    local = list_local([ckpt_dir] + list(extra_dirs))
+def find_resume(ckpt_dir: str, extra_dirs: List[str], hub: Optional[Hub], run_name: str = "") -> Optional[str]:
+    """Path of the newest checkpoint (downloading from the hub if that is newest).
+
+    A checkpoint found in extra_dirs inside a run layout (<run>/checkpoints/) counts only if <run> is
+    run_name, so a run that also mounts another run's output (SFT reading the pretraining
+    checkpoint) does not resume from it. Loose checkpoints (the backup dataset) still count.
+    """
+    def ours(p: str) -> bool:
+        parts = os.path.normpath(p).split(os.sep)
+        return len(parts) < 3 or parts[-2] != "checkpoints" or parts[-3] == run_name
+
+    extra = list_local(list(extra_dirs))
+    if run_name:
+        extra = [p for p in extra if ours(p)]
+    local = sorted(list_local([ckpt_dir]) + extra, key=ckpt_step)
     best_local: Tuple[int, Optional[str]] = (ckpt_step(local[-1]), local[-1]) if local else (-1, None)
     if hub is not None:
         remote = hub.remote_ckpts()
