@@ -1,6 +1,6 @@
 # Model Card: MORPH-S
 
-**Status:** pretrained (3B tokens, validation perplexity 17.4 on FineWeb-Edu, HellaSwag 32.7% zero-shot); instruction tuning in progress.
+**Status:** pretrained (3B tokens, validation perplexity 17.4 on FineWeb-Edu, HellaSwag 32.7% zero-shot); instruction-tuned variant (smol-smoltalk, 0.15B tokens, HellaSwag 32.4%) in `sft/`.
 
 ## Summary
 MORPH-S is a ~170M-parameter (138M non-embedding) decoder LM: a Mamba2-majority hybrid with
