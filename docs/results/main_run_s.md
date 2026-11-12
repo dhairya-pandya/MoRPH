@@ -1,7 +1,8 @@
 # Main run: MORPH-S (170M, λ=1.0) on FineWeb-Edu
 
 Status: done — 3.0B tokens (11,445 steps) over 12 Kaggle sessions (T4×2, fp16, DDP).
-Final validation perplexity **17.4** (CE 2.859).
+Final validation perplexity **17.4** (CE 2.859). HellaSwag (full validation set, 10,042 items,
+zero-shot, ending chosen by mean per-token log-likelihood): **32.7%** (chance 25%).
 
 Setup: `configs/model/s.json` + `configs/train/main_s.json`. Global batch 128 × 2048 tokens,
 Muon (matrices) + AdamW (embeddings, norms, heads), peak LR 2e-3, WSD schedule (decay over the

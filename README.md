@@ -77,7 +77,7 @@ Kaggle secret `HF_TOKEN` is attached.
 ## Status
 
 `[x]` v2 architecture + pipeline · `[x]` data (5.2B tokens) · `[x]` proxy ablation (R0–R5,
-[results](docs/results/proxy_ablation.md)) · `[x]` main run MORPH-S (3B tokens, val ppl 17.4, [results](docs/results/main_run_s.md)) · `[x]` MoD (implemented; [XS result](docs/results/stage2_mod_xs.md): no speedup on T4, +1–2% loss → not used) · `[x]` SVF ([XS result](docs/results/stage3_svf_xs.md): 23k-number experts, −4 to −16% domain loss, two-pass router keeps general text within 0.2%) · `[~]` SFT (smol-smoltalk, 0.15B tokens; running on Kaggle) · `[ ]` publish
+[results](docs/results/proxy_ablation.md)) · `[x]` main run MORPH-S (3B tokens, val ppl 17.4, HellaSwag 32.7%, [results](docs/results/main_run_s.md)) · `[x]` MoD (implemented; [XS result](docs/results/stage2_mod_xs.md): no speedup on T4, +1–2% loss → not used) · `[x]` SVF ([XS result](docs/results/stage3_svf_xs.md): 23k-number experts, −4 to −16% domain loss, two-pass router keeps general text within 0.2%) · `[~]` SFT (smol-smoltalk, 0.15B tokens; running on Kaggle) · `[ ]` publish
 
 <details><summary>Credits</summary>
 
