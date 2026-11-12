@@ -1,7 +1,7 @@
 # Main run: MORPH-S (170M, λ=1.0) on FineWeb-Edu
 
-Status: in progress — 2.62B of 3B tokens after 10 Kaggle sessions (T4×2, fp16, DDP).
-Final numbers land when the last session finishes.
+Status: done — 3.0B tokens (11,445 steps) over 12 Kaggle sessions (T4×2, fp16, DDP).
+Final validation perplexity **17.4** (CE 2.859).
 
 Setup: `configs/model/s.json` + `configs/train/main_s.json`. Global batch 128 × 2048 tokens,
 Muon (matrices) + AdamW (embeddings, norms, heads), peak LR 2e-3, WSD schedule (decay over the
@@ -22,13 +22,17 @@ entering the four attention layers:
 | 7750 | 2.03B | 21.0 | 519 | 564 | 0.57 | 0.90 |
 | 9250 | 2.43B | 20.1 | 523 | 564 | 0.56 | 0.89 |
 | 9750 | 2.56B | 19.0 | 523 | 563 | 0.56 | 0.89 |
+| 10250 | 2.69B | 18.4 | 522 | 563 | 0.57 | 0.89 |
+| 10750 | 2.82B | 17.8 | 521 | 562 | 0.57 | 0.89 |
+| 11250 | 2.95B | 17.5 | 520 | 562 | 0.57 | 0.88 |
+| 11445 | 3.00B | **17.4** | 520 | 562 | 0.58 | 0.88 |
 
 erank = effective rank of the RMS-normalized state (out of 640). R² = variance of that state
 explained by the self-model head's prediction from the final hidden state.
 
-Observations so far:
-1. **The decay phase pays off immediately.** Validation perplexity fell 20.1 → 19.0 in the
-   first 0.16B tokens of LR decay (from 2.4B), more than over the previous 0.4B tokens at peak LR.
+Observations:
+1. **The decay phase pays off immediately.** Validation perplexity fell 20.1 → 17.4 over the
+   0.6B-token LR decay (from 2.4B), versus 21.0 → 20.1 over the 0.4B tokens before it at peak LR.
 2. **Self-modeling does not stop the representation from growing.** Effective rank grows and then
    plateaus: L19 reaches 564 by 0.5B tokens, L4 climbs slowly to 523 by 2.4B. The proxy
    ablation showed λ=1.0 lowers erank relative to λ=0 (−8% at XS), not that it shrinks it

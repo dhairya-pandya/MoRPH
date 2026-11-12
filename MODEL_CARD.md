@@ -1,6 +1,6 @@
 # Model Card: MORPH-S
 
-**Status:** in training (v2 pipeline complete; proxy ablation and main run on Kaggle).
+**Status:** pretrained (3B tokens, validation perplexity 17.4 on FineWeb-Edu); instruction tuning in progress.
 
 ## Summary
 MORPH-S is a ~170M-parameter (138M non-embedding) decoder LM: a Mamba2-majority hybrid with
@@ -19,11 +19,11 @@ self-modeling auxiliary objective. It targets from-scratch training on free Kagg
 2,013 MB for equal-depth multi-head attention.
 
 ## Training
-FineWeb-Edu (sample-10BT), SmolLM2 tokenizer, 5B tokens planned, seq 2048, 262k tokens/step,
+FineWeb-Edu (sample-10BT), SmolLM2 tokenizer, 3B tokens (12 Kaggle sessions), seq 2048, 262k tokens/step,
 Muon + AdamW, WSD schedule, fp16 + loss scaling on T4 (bf16 on Ampere+).
 
 ## Limitations
-Not yet trained: no quality claims. Four attention layers limit exact long-range recall
+Small and lightly trained (3B tokens): expect weak factual recall and reasoning; benchmarks pending. Four attention layers limit exact long-range recall
 compared with full attention. The self-modeling effect has only been shown on small
 classifiers; the proxy ablation tests whether it transfers to language modeling.
 
