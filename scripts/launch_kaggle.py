@@ -108,6 +108,10 @@ sh(f"cd {SRC} && torchrun --nproc_per_node=2 -m morph.train.pretrain --model_con
 sh(f"cd {SRC} && python -m morph.eval.generate --ckpt $(ls {W}/runs/sft_s/checkpoints/ckpt_*.pt | tail -1) --chat "
    f"--prompt 'What is photosynthesis?' --prompt 'Write a haiku about the sea.' "
    f"--prompt 'Give me three tips for learning Python.' | tee {W}/sft_samples.txt")
+sft_ck = sorted(glob.glob(f"{W}/runs/sft_s/checkpoints/ckpt_*.pt"))[-1]
+sh(f"cd {SRC} && (CUDA_VISIBLE_DEVICES=0 python -m morph.eval.hellaswag --ckpt {ck} > {W}/hellaswag_base.json & "
+   f"CUDA_VISIBLE_DEVICES=1 python -m morph.eval.hellaswag --ckpt {sft_ck} > {W}/hellaswag_sft.json; wait) && "
+   f"cat {W}/hellaswag_base.json {W}/hellaswag_sft.json")
 ''',
     "gate": r'''
 sh("pip install -q flash-linear-attention || true")
