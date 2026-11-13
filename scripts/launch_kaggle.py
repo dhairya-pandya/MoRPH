@@ -55,6 +55,12 @@ EXPERIMENTS = {
     1: [prep_domain("stories", "roneneldan/TinyStories", "data", "text"), svf_expert("stories")],
     "after": [svf_router_eval(["math", "code", "stories"])],
 }""",
+    "svf-s": """{
+    0: [prep_domain("math", "open-web-math/open-web-math", "data", "text"), svf_expert("math", base=MAIN, tag="_s"),
+        prep_domain("code", "codeparrot/codeparrot-clean", "", "content"), svf_expert("code", base=MAIN, tag="_s")],
+    1: [prep_domain("stories", "roneneldan/TinyStories", "data", "text"), svf_expert("stories", base=MAIN, tag="_s")],
+    "after": [svf_router_eval(["math", "code", "stories"], base=MAIN, tag="_s")],
+}""",
     "speed-llc2": """{
     0: [ctrl_run("ctrl_xs2"), mod_run("mod_v2a", ["mod_capacity=0.75", "mod_aux_weight=0.05"])],
     1: [llc(r, eps="1e-5", gamma="1000", steps="500", tag="_g1000") for r in ("R0", "R2", "R3")],
@@ -152,7 +158,8 @@ DATA = data_dir()
 R2 = sorted(glob.glob("/kaggle/input/**/proxy_R2/checkpoints/ckpt_*.pt", recursive=True))[-1]
 CKPTS = {r: sorted(glob.glob(f"/kaggle/input/**/proxy_{r}/checkpoints/ckpt_*.pt", recursive=True))[-1]
          for r in ("R0", "R1", "R2", "R3")}
-print("checkpoints", CKPTS, flush=True)
+MAIN = (sorted(glob.glob("/kaggle/input/**/main_s/checkpoints/ckpt_*.pt", recursive=True)) or [None])[-1]
+print("checkpoints", CKPTS, "main", MAIN, flush=True)
 os.makedirs(f"{W}/logs", exist_ok=True)
 os.makedirs(f"{W}/llc", exist_ok=True)
 
@@ -178,19 +185,23 @@ def prep_domain(name, repo, subdir, column, tokens="8e6"):
             f"--column {column} --train_tokens {tokens} --val_tokens 5e5 --val_every 20 --shard_tokens 5e7 "
             f"--batch_docs 500 --cache_dir /tmp/hf")
 
-def svf_expert(name, steps=300):
-    return (f"python -m morph.train.svf_train expert --base {R2} --domain {name}={W}/domains/{name} "
-            f"--general {DATA} --out {W}/experts/{name}.safetensors --steps {steps} --batch 16 --micro 8 "
+def svf_expert(name, steps=300, base=None, tag=""):
+    micro = 4 if tag == "_s" else 8                       # MORPH-S activations on a 16 GB T4
+    return (f"python -m morph.train.svf_train expert --base {base or R2} --domain {name}={W}/domains/{name} "
+            f"--general {DATA} --out {W}/experts{tag}/{name}.safetensors --steps {steps} --batch 16 --micro {micro} "
             f"--seq 1024 --lr 2e-3 --eval_every 50 --eval_windows 64")
 
-def svf_router_eval(names):
+def svf_router_eval(names, base=None, tag=""):
     doms = " ".join([f"general={DATA}"] + [f"{n}={W}/domains/{n}" for n in names])
-    exps = " ".join(f"{n}={W}/experts/{n}.safetensors" for n in names)
-    return (f"python -m morph.train.svf_train router --base {R2} --domains {doms} --out {W}/experts/router.pt "
-            f"&& python -m morph.train.svf_train evaluate --base {R2} --domains {doms} --experts {exps} "
-            f"--router {W}/experts/router.pt --n_eval 64 --out {W}/experts/svf_eval.json")
+    exps = " ".join(f"{n}={W}/experts{tag}/{n}.safetensors" for n in names)
+    micro = 4 if tag == "_s" else 8
+    return (f"python -m morph.train.svf_train router --base {base or R2} --domains {doms} --out {W}/experts{tag}/router.pt "
+            f"--micro {2 * micro} && python -m morph.train.svf_train evaluate --base {base or R2} --domains {doms} "
+            f"--experts {exps} --router {W}/experts{tag}/router.pt --n_eval 64 --micro {micro} "
+            f"--out {W}/experts{tag}/svf_eval.json")
 
 os.makedirs(f"{W}/experts", exist_ok=True)
+os.makedirs(f"{W}/experts_s", exist_ok=True)
 QUEUES = {QUEUES}
 AFTER = QUEUES.pop("after", [])
 procs = []
@@ -325,7 +336,7 @@ def push(job: str, runs=(), hours: float = 11.6):
         "kernel_sources": ([] if job in ("prep", "gate", "profile", "sft-prep", "sft") else [f"{user}/{DATA_KERNEL}"]) + chain
                           + ([f"{user}/morph-sft-prep", f"{user}/morph-main"] if job == "sft" else [])
                           + ([f"{user}/morph-proxy-r2-r3"] if job in ("stage2_xs", "exp") else [])
-                          + ([f"{user}/morph-proxy-r0-r1"] if job == "exp" else []),
+                          + ([f"{user}/morph-proxy-r0-r1", f"{user}/morph-main"] if job == "exp" else []),
     }
     if job not in ("prep", "sft-prep"):
         meta["machine_shape"] = "NvidiaTeslaT4"
