@@ -19,7 +19,8 @@ self-modeling auxiliary objective. It targets from-scratch training on free Kagg
 ## Usage
 The architecture is custom, so load it with the MORPH code (github.com/dhairya-pandya/MoRPH).
 Tokenizer: `HuggingFaceTB/SmolLM2-135M`. Files: `model.safetensors` (base), `sft/model.safetensors`
-(instruction-tuned, ChatML), `config.json`, `eval/` (HellaSwag, sample replies).
+(instruction-tuned, ChatML), `config.json`, `eval/` (HellaSwag, sample replies), `svf/` (SVF experts for math, code and stories
+plus the two-pass router, used with `morph/train/svf_train.py`; −6 to −20% domain loss).
 
 ```bash
 git clone https://github.com/dhairya-pandya/MoRPH && cd MoRPH && pip install -r requirements.txt
