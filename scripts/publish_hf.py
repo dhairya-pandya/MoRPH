@@ -43,7 +43,7 @@ def main(argv=None):
     with tempfile.TemporaryDirectory() as d:
         shutil.copy(args.weights, os.path.join(d, "model.safetensors"))
         with open(os.path.join(d, "config.json"), "w") as f:
-            json.dump({**model_config(args.weights), "tokenizer": "HuggingFaceTB/SmolLM2-135M"}, f, indent=2)
+            json.dump(model_config(args.weights), f, indent=2)        # loads with MorphConfig.from_json
         shutil.copy(args.card, os.path.join(d, "README.md"))
         if args.sft:
             os.makedirs(os.path.join(d, "sft"))

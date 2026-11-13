@@ -1,3 +1,12 @@
+---
+license: mit
+language: en
+library_name: pytorch
+pipeline_tag: text-generation
+tags: [mamba2, hybrid, mla, self-modeling, small-lm]
+datasets: [HuggingFaceFW/fineweb-edu, HuggingFaceTB/smol-smoltalk]
+---
+
 # Model Card: MORPH-S
 
 **Status:** pretrained (3B tokens, validation perplexity 17.4 on FineWeb-Edu, HellaSwag 32.7% zero-shot); instruction-tuned variant (smol-smoltalk, 0.15B tokens, HellaSwag 32.4%) in `sft/`.
@@ -6,6 +15,18 @@
 MORPH-S is a ~170M-parameter (138M non-embedding) decoder LM: a Mamba2-majority hybrid with
 four NoPE Multi-head Latent Attention layers sharing two cached latents, trained with a
 self-modeling auxiliary objective. It targets from-scratch training on free Kaggle T4×2.
+
+## Usage
+The architecture is custom, so load it with the MORPH code (github.com/dhairya-pandya/MoRPH).
+Tokenizer: `HuggingFaceTB/SmolLM2-135M`. Files: `model.safetensors` (base), `sft/model.safetensors`
+(instruction-tuned, ChatML), `config.json`, `eval/` (HellaSwag, sample replies).
+
+```bash
+git clone https://github.com/dhairya-pandya/MoRPH && cd MoRPH && pip install -r requirements.txt
+huggingface-cli download dhairyapandya/morph-s --local-dir morph-s
+PYTHONPATH=. python -m morph.eval.generate --weights morph-s/sft/model.safetensors \
+  --config morph-s/config.json --chat --prompt "What is photosynthesis?"
+```
 
 ## Architecture
 - 24 layers, d_model 640; Mamba2 (20 layers, 20 heads × 64, d_state 128) + MLA at layers
